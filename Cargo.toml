@@ -8,7 +8,7 @@ description = "Rust bindings for libffi, alternative to libffi-rs"
 keywords = ["ffi", "libffi", "abi", "closure"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/emiltayl/fiffi/"
-exclude = ["/test_crates", "/scripts"]
+exclude = [".github", "/test_crates", "/scripts"]
 
 [dependencies]
 libffi-sys = { version = "4.2.0", default-features = false }
