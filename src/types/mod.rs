@@ -17,12 +17,8 @@ extern crate alloc;
 
 #[cfg(not(test))]
 use alloc::vec::Vec;
-use core::ptr::null_mut;
 
-use crate::errors::{EmptyStructError, InvalidVariadicTypeError, LibffiError};
-use crate::types::raw::LibffiType;
-
-pub(crate) mod raw;
+use crate::errors::{EmptyStructError, InvalidVariadicTypeError};
 
 pub(crate) mod internal {
     use super::Type;
@@ -91,6 +87,12 @@ pub enum Type {
     /// Unsigned 64-bit integer
     U64,
 
+    /// Signed 128-bit integer
+    I128,
+
+    /// Unsigned 128-bit integer
+    U128,
+
     /// Signed pointer-sized integer
     Isize,
 
@@ -110,8 +112,15 @@ pub enum Type {
     ///
     /// A `Type::Struct` must be created using [`Type::create_struct`] or
     /// [`Type::create_struct_from_slice`]. This ensures that the struct is not empty, as empty
-    /// structs are not supported by libffi.
+    /// structs are not supported by fiffi.
     Struct(internal::StructTypeVec),
+
+    /// C-compatible union with at least one variant.
+    ///
+    /// A `Type::Union` must be created using [`Type::create_union`] or
+    /// [`Type::create_union_from_slice`]. This ensures that the union is not empty, as empty
+    /// unions are not supported by fiffi.
+    Union(internal::StructTypeVec),
 }
 
 /// A type description that can be used for variadic arguments.
@@ -137,6 +146,12 @@ pub enum VariadicType {
     /// Unsigned 64-bit integer
     U64,
 
+    /// Signed 128-bit integer
+    I128,
+
+    /// Unsigned 128-bit integer
+    U128,
+
     /// Signed pointer-sized integer
     Isize,
 
@@ -153,14 +168,21 @@ pub enum VariadicType {
     ///
     /// A `VariadicType::Struct` must be created using [`VariadicType::create_struct`] or
     /// [`VariadicType::create_struct_from_slice`]. This ensures that the struct is not empty, as
-    /// empty structs are not supported by libffi.
+    /// empty structs are not supported by fiffi.
     Struct(internal::StructTypeVec),
+
+    /// C-compatible union with at least one variant.
+    ///
+    /// A `Type::Union` must be created using [`VariadicType::create_union`] or
+    /// [`VariadicType::create_union_from_slice`]. This ensures that the union is not empty, as
+    /// empty unions are not supported by fiffi.
+    Union(internal::StructTypeVec),
 }
 
-/// Size and alignment reported by libffi for a [`Type`].
+/// Size and alignment used by fiffi for a [`Type`].
 ///
 /// This can be used to make sure that [`FfiType`] implementations are correct by verifying
-/// that a Rust type and the type seen by libffi have the same memory size and alignment. Use
+/// that a Rust type and the type used by fiffi have the same memory size and alignment. Use
 /// [`Type::layout`] to get the `FfiTypeLayout` for a [`Type`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FfiTypeLayout {
@@ -237,141 +259,12 @@ impl Type {
         unsafe { Self::create_struct_unchecked(types.to_vec()) }
     }
 
-    /// Returns the size and alignment libffi uses for the type described by `self` with the default
-    /// ABI.
-    ///
-    /// This can be used to make sure that [`FfiType`] implementations are correct by verifying
-    /// that a Rust type and the type seen by libffi have the same memory size and alignment
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use std::ffi::c_void;
-    ///
-    /// use fiffi::types::Type;
-    ///
-    /// #[repr(C)]
-    /// struct FfiStruct(*const c_void, u8, u8);
-    ///
-    /// let ffi_struct_type = Type::create_struct(vec![Type::Pointer, Type::U8, Type::U8])?;
-    ///
-    /// let type_layout = ffi_struct_type.layout();
-    ///
-    /// assert_eq!(type_layout.align, align_of::<FfiStruct>());
-    /// assert_eq!(type_layout.size, size_of::<FfiStruct>());
-    ///
-    /// # Ok::<(), fiffi::errors::EmptyStructError>(())
-    /// ```
     pub fn layout(&self) -> FfiTypeLayout {
-        let libffi_type = LibffiType::new(self);
-        let ffi_type_ptr = libffi_type.0.as_ptr();
-
-        // If `self` is a `Struct` we need to call `ffi_get_struct_offsets` to get the type's
-        // layout. Otherwise, we can just read from the `ffi_type` as the size and alignment has
-        // already been initialized by libffi.
-        if let Type::Struct(_) = self {
-            // SAFETY:
-            // * `LibffiType` guarantees that a new `ffi_type` has been allocated and stored in the
-            //   struct.
-            // * The ABI may impact the size and alignment of a type, however this is only
-            //   documented to happen for `long double`s on PowerPC. `long double` is not supported
-            //   by this crate yet, so we just use the default ABI.
-            // * If the `offsets` parameter is NULL, libffi will not write any data to it.
-            let status = unsafe {
-                libffi_sys::ffi_get_struct_offsets(
-                    libffi_sys::ffi_abi_FFI_DEFAULT_ABI,
-                    ffi_type_ptr,
-                    null_mut(),
-                )
-            };
-
-            // It should not be possible to create a struct that has an invalid layout which would
-            // cause an error.
-            #[allow(
-                clippy::missing_panics_doc,
-                reason = "Internal sanity check only fails if there is an internal bug in this crate."
-            )]
-            {
-                assert!(
-                    LibffiError::from_status(status).is_none(),
-                    "Libffi returned the error code {status} from `ffi_get_struct_offsets`."
-                );
-            }
-        }
-
-        // SAFETY: `LibffiType` guarantees that a new `ffi_type` has been allocated and stored
-        // in the struct.
-        unsafe {
-            FfiTypeLayout {
-                align: (*ffi_type_ptr).alignment.into(),
-                size: (*ffi_type_ptr).size,
-            }
-        }
+        todo!();
     }
 
-    /// Returns the offset to each field of a [`Type::Struct`], or an empty vector for non-struct
-    /// types.
-    ///
-    /// This can be used to make sure that [`FfiType`] implementations are correct by verifying
-    /// that the offsets of fields in a Rust struct matches the offsets used by libffi.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use std::mem::offset_of;
-    ///
-    /// use fiffi::types::Type;
-    ///
-    /// #[repr(C)]
-    /// struct Pair {
-    ///     first: u8,
-    ///     second: u32,
-    /// }
-    ///
-    /// let ty = Type::create_struct(vec![Type::U8, Type::U32])?;
-    /// let offsets = ty.field_offsets();
-    ///
-    /// assert_eq!(offsets[0], offset_of!(Pair, first));
-    /// assert_eq!(offsets[1], offset_of!(Pair, second));
-    ///
-    /// # Ok::<(), fiffi::errors::EmptyStructError>(())
-    /// ```
     pub fn field_offsets(&self) -> Vec<usize> {
-        if let Type::Struct(children) = self {
-            let libffi_type = LibffiType::new(self);
-            let mut offsets = alloc::vec![0usize; children.as_vec().len()];
-
-            // SAFETY:
-            // * `LibffiType` guarantees that a new `ffi_type` has been allocated and stored in the
-            //   struct.
-            // * The ABI may impact the size and alignment of a type, however this is only
-            //   documented to happen for `long double`s on PowerPC. `long double` is not supported
-            //   by this crate yet, so we just use the default ABI.
-            // * `offsets` has allocated space to store the offset for every member of this struct.
-            let status = unsafe {
-                libffi_sys::ffi_get_struct_offsets(
-                    libffi_sys::ffi_abi_FFI_DEFAULT_ABI,
-                    libffi_type.0.as_ptr(),
-                    offsets.as_mut_ptr().cast(),
-                )
-            };
-
-            #[allow(
-                clippy::missing_panics_doc,
-                reason = "Internal sanity check only fails if there is an internal bug in this crate."
-            )]
-            {
-                assert!(
-                    LibffiError::from_status(status).is_none(),
-                    "Libffi returned the error code {status} from `ffi_get_struct_offsets`."
-                );
-            }
-
-            offsets
-        } else {
-            // It does not make any sense to return offsets for types that are not structs.
-            Vec::new()
-        }
+        todo!();
     }
 }
 
@@ -433,11 +326,14 @@ impl VariadicType {
             VariadicType::U32 => Type::U32,
             VariadicType::I64 => Type::I64,
             VariadicType::U64 => Type::U64,
+            VariadicType::I128 => Type::I128,
+            VariadicType::U128 => Type::U128,
             VariadicType::Isize => Type::Isize,
             VariadicType::Usize => Type::Usize,
             VariadicType::F64 => Type::F64,
             VariadicType::Pointer => Type::Pointer,
             VariadicType::Struct(types) => Type::Struct(types.clone()),
+            VariadicType::Union(types) => Type::Union(types.clone()),
         }
     }
 }
@@ -451,11 +347,14 @@ impl TryFrom<Type> for VariadicType {
             Type::U32 => Ok(Self::U32),
             Type::I64 => Ok(Self::I64),
             Type::U64 => Ok(Self::U64),
+            Type::I128 => Ok(Self::I128),
+            Type::U128 => Ok(Self::U128),
             Type::Isize => Ok(Self::Isize),
             Type::Usize => Ok(Self::Usize),
             Type::F64 => Ok(Self::F64),
             Type::Pointer => Ok(Self::Pointer),
             Type::Struct(types) => Ok(Self::Struct(types)),
+            Type::Union(types) => Ok(Self::Union(types)),
             Type::I8 | Type::U8 | Type::I16 | Type::U16 | Type::F32 => {
                 Err(InvalidVariadicTypeError(value))
             }
@@ -596,6 +495,20 @@ unsafe impl FfiType for u64 {
     }
 }
 
+// SAFETY: `i128` has the C ABI layout described by `Type::I128`.
+unsafe impl FfiType for i128 {
+    fn ffi_type() -> Type {
+        Type::I128
+    }
+}
+
+// SAFETY: `u128` has the C ABI layout described by `Type::U128`.
+unsafe impl FfiType for u128 {
+    fn ffi_type() -> Type {
+        Type::U128
+    }
+}
+
 // SAFETY: `isize` has the same layout as the target pointer-sized signed integer.
 unsafe impl FfiType for isize {
     fn ffi_type() -> Type {
@@ -635,159 +548,5 @@ unsafe impl<T> FfiType for *const T {
 unsafe impl<T> FfiType for *mut T {
     fn ffi_type() -> Type {
         Type::Pointer
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use alloc::vec;
-    use core::ffi::c_void;
-    use core::mem::offset_of;
-
-    use super::*;
-
-    #[derive(Copy, Clone)]
-    #[repr(C)]
-    struct TestStruct(i8, u16, i32, u64, isize, f64, *const c_void, SubStruct);
-
-    // SAFETY: `TestStruct` is `repr(C)`, `Copy`, and its `Type` lists every field in order.
-    unsafe impl FfiType for TestStruct {
-        fn ffi_type() -> Type {
-            // SAFETY: `create_struct` will return a `Type` if the input `Vec` is not empty.
-            unsafe {
-                Type::create_struct_unchecked(vec![
-                    Type::I8,
-                    Type::U16,
-                    Type::I32,
-                    Type::U64,
-                    Type::Isize,
-                    Type::F64,
-                    Type::Pointer,
-                    SubStruct::ffi_type(),
-                ])
-            }
-        }
-    }
-
-    #[derive(Copy, Clone)]
-    #[repr(C)]
-    struct SubStruct(f32, i16);
-
-    // SAFETY: `SubStruct` is `repr(C)`, `Copy`, and its `Type` lists every field in order.
-    unsafe impl FfiType for SubStruct {
-        fn ffi_type() -> Type {
-            // SAFETY: `create_struct` will return a `Type` if the input `Vec` is not empty.
-            unsafe { Type::create_struct_unchecked(vec![Type::F32, Type::I16]) }
-        }
-    }
-
-    #[test]
-    fn test_struct_size_alignment_offsets() {
-        let sub_struct_type = SubStruct::ffi_type();
-
-        let sub_struct_layout = sub_struct_type.layout();
-        assert_eq!(size_of::<SubStruct>(), sub_struct_layout.size);
-        assert_eq!(align_of::<SubStruct>(), sub_struct_layout.align);
-
-        let sub_struct_offsets = sub_struct_type.field_offsets();
-        assert_eq!(offset_of!(SubStruct, 0), sub_struct_offsets[0]);
-        assert_eq!(offset_of!(SubStruct, 1), sub_struct_offsets[1]);
-
-        let test_struct_type = TestStruct::ffi_type();
-
-        let test_struct_layout = test_struct_type.layout();
-        assert_eq!(size_of::<TestStruct>(), test_struct_layout.size);
-        assert_eq!(align_of::<TestStruct>(), test_struct_layout.align);
-
-        let test_struct_offsets = test_struct_type.field_offsets();
-        assert_eq!(offset_of!(TestStruct, 0), test_struct_offsets[0]);
-        assert_eq!(offset_of!(TestStruct, 1), test_struct_offsets[1]);
-        assert_eq!(offset_of!(TestStruct, 2), test_struct_offsets[2]);
-        assert_eq!(offset_of!(TestStruct, 3), test_struct_offsets[3]);
-        assert_eq!(offset_of!(TestStruct, 4), test_struct_offsets[4]);
-        assert_eq!(offset_of!(TestStruct, 5), test_struct_offsets[5]);
-        assert_eq!(offset_of!(TestStruct, 6), test_struct_offsets[6]);
-        assert_eq!(offset_of!(TestStruct, 7), test_struct_offsets[7]);
-    }
-
-    #[test]
-    fn verify_ffi_type_size_and_alignment() {
-        macro_rules! verify_type {
-            ($t:ty) => {
-                let libffi_type_layout = <$t>::ffi_type().layout();
-                assert_eq!(
-                    size_of::<$t>(),
-                    libffi_type_layout.size,
-                    "The size of type `{}` is not the same in libffi.",
-                    core::any::type_name::<$t>()
-                );
-                assert_eq!(
-                    align_of::<$t>(),
-                    libffi_type_layout.align,
-                    "The alignment of type `{}` is not the same in libffi.",
-                    core::any::type_name::<$t>()
-                );
-            };
-        }
-
-        verify_type!(i8);
-        verify_type!(u8);
-        verify_type!(i16);
-        verify_type!(u16);
-        verify_type!(i32);
-        verify_type!(u32);
-        verify_type!(i64);
-        verify_type!(u64);
-        verify_type!(isize);
-        verify_type!(usize);
-        verify_type!(f32);
-        verify_type!(f64);
-        verify_type!(*const c_void);
-        verify_type!(*mut c_void);
-    }
-
-    #[test]
-    fn variadic_type_conversions_accept_supported_types() {
-        let supported_types = [
-            Type::I32,
-            Type::U32,
-            Type::I64,
-            Type::U64,
-            Type::Isize,
-            Type::Usize,
-            Type::F64,
-            Type::Pointer,
-            Type::create_struct(vec![Type::I8]).unwrap(),
-        ];
-
-        for ty in supported_types {
-            let variadic_type = VariadicType::try_from(ty.clone()).unwrap();
-
-            assert_eq!(Type::from(variadic_type), ty);
-        }
-    }
-
-    #[test]
-    fn variadic_type_conversions_reject_unsupported_types() {
-        let unsupported_types = [Type::I8, Type::U8, Type::I16, Type::U16, Type::F32];
-
-        for ty in unsupported_types {
-            assert_eq!(
-                VariadicType::try_from(ty.clone()),
-                Err(InvalidVariadicTypeError(ty))
-            );
-        }
-    }
-
-    #[test]
-    fn struct_constructors_disallow_empty_structs() {
-        assert_eq!(Type::create_struct(vec![]), Err(EmptyStructError));
-        assert_eq!(VariadicType::create_struct(vec![]), Err(EmptyStructError));
-
-        assert_eq!(Type::create_struct_from_slice(&[]), Err(EmptyStructError));
-        assert_eq!(
-            VariadicType::create_struct_from_slice(&[]),
-            Err(EmptyStructError)
-        );
     }
 }

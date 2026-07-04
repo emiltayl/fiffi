@@ -1,0 +1,27 @@
+# Writing a libffi alternative in plain Rust (and assembly)
+
+fiffi started as an alternative libffi wrapper to libffi-rs. However, after having worked with this
+for a while I wanted to have a go at creating an alternative to libffi written in Rust (and
+assembly). I hope to create a ffi library that can be built without requiring any other external
+tools than the Rust compiler.
+
+Fiffi will not support as many architectures and ABIs as libffi. The main goal is to support common
+ABIs on common platforms, and then branch out from there as needed.
+
+# Plan
+
+* [ ] `Type` size and layout functionality
+* [ ] Comprehensive test suite for function calls
+* [ ] 64-bit x86 SysV ABI for function calls
+  * [ ] Argument, return value classification
+  * [ ] Plan for marshalling arguments
+  * [ ] Assembly: argument marshalling, the call and return value handling
+* [ ] 64-bit x86 Win64 ABI for function calls
+* [ ] 32-bit x86 ABIs for function calls
+* [ ] Aarch64 ABIs for function calls
+* [ ] Review status
+* [ ] Closures?
+
+# Work log
+
+* 2026-07-04 Started this document

@@ -159,7 +159,8 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod abi;
-#[cfg(feature = "closure")]
+// TODO enable closures when calls are up and running
+#[cfg(all(feature = "closure", false))]
 pub mod closure;
 pub mod errors;
 pub mod function;
@@ -167,9 +168,6 @@ pub mod types;
 
 mod fn_ptr;
 pub use fn_ptr::FnPtr;
-
-pub(crate) mod raw;
-pub(crate) mod return_buffer;
 
 #[cfg(msan)]
 unsafe extern "C" {
@@ -184,16 +182,14 @@ unsafe extern "C" {
 #[cfg(test)]
 pub(crate) mod test_utils {
     use core::ffi::{CStr, c_char, c_void};
-    use core::ptr::null_mut;
 
-    use libffi_sys::{FFI_TYPE_STRUCT, ffi_type};
-
-    use crate::raw::{ffi_type_uint8, ffi_type_uint64};
     use crate::types::{FfiType, Type};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     #[repr(C)]
     pub struct TestStruct(pub u8, pub u64, pub u64, pub u64, pub u64);
+
+    // TODO new types as needed
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     #[repr(transparent)]
@@ -221,15 +217,6 @@ pub(crate) mod test_utils {
         }
     }
 
-    pub static mut TEST_STRUCT_MEMBERS: [*mut ffi_type; 6] = [
-        &raw mut ffi_type_uint8,
-        &raw mut ffi_type_uint64,
-        &raw mut ffi_type_uint64,
-        &raw mut ffi_type_uint64,
-        &raw mut ffi_type_uint64,
-        null_mut(),
-    ];
-
     pub static I8_ARG: i8 = 0x11;
     pub static U8_ARG: u8 = 0x22;
     pub static I16_ARG: i16 = 0x3333;
@@ -238,6 +225,8 @@ pub(crate) mod test_utils {
     pub static U32_ARG: u32 = 0x6666_6666;
     pub static I64_ARG: i64 = 0x7777_7777_7777_7777;
     pub static U64_ARG: u64 = 0x8888_8888_8888_8888;
+    pub static I128_ARG: i128 = 0x7777_7777_7777_7777_7777_7777_7777_7777;
+    pub static U128_ARG: u128 = 0xaaaa_aaaa_aaaa_aaaa_aaaa_aaaa_aaaa_aaaa;
     #[expect(
         clippy::cast_possible_truncation,
         reason = "Truncating is not a problem in this instance as we are comparing the argument with `ISIZE_ARG` anyways."
@@ -268,14 +257,6 @@ pub(crate) mod test_utils {
     pub static SNPRINTF_ARG_6: f64 = 1.0;
     pub static SNPRINTF_EXPECTED_OUTPUT: &CStr = c"1: 1234567, 2: 9876543, 3: 12345678900, 4: 98765432100, 5: \"This is a &CStr\", 6: 1.0.\n";
     pub static SNPRINTF_EXPECTED_RETURN_VALUE: i32 = 86;
-
-    pub fn get_test_struct_ffi_type() -> ffi_type {
-        ffi_type {
-            type_: FFI_TYPE_STRUCT,
-            elements: (&raw mut TEST_STRUCT_MEMBERS).cast(),
-            ..Default::default()
-        }
-    }
 
     #[cfg_attr(target_env = "msvc", link(name = "legacy_stdio_definitions"))]
     unsafe extern "C" {

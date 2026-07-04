@@ -11,13 +11,10 @@ repository = "https://github.com/emiltayl/fiffi/"
 exclude = [".github", "/test_crates", "/scripts"]
 
 [dependencies]
-libffi-sys = { version = "4.2.0", default-features = false }
 
 [features]
-default = ["closure"]
+default = []
 closure = []
-check_only = ["libffi-sys/check_only"]
-system = ["libffi-sys/system"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(msan)'] }
