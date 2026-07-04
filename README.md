@@ -1,7 +1,10 @@
 # fiffi
 
+[![Crates.io][crates-badge]][crates-url]
+[![Docs][docs-image]][docs-link]
 [![Apache 2.0 licensed][apache-badge]][apache-url]
 [![MIT licensed][mit-badge]][mit-url]
+[![Build Status][build-image]][build-link]
 
 `fiffi` (*\[fi\`f:i]*) provides Rust bindings for [`libffi`]. [`libffi-rs`] already provides Rust
 bindings for `libffi`, but `fiffi` aims to provide more ergonomic bindings that makes it easier to
@@ -206,7 +209,13 @@ Development currently occurs mainly on x86_64 Linux and Windows.
 [`Function`]: https://docs.rs/fiffi/latest/fiffi/function/struct.Function.html
 [`Closure`]: https://docs.rs/fiffi/latest/fiffi/closure/struct.Closure.html
 [`DynamicClosure`]: https://docs.rs/fiffi/latest/fiffi/closure/struct.DynamicClosure.html
+[crates-badge]: https://img.shields.io/crates/v/fiffi.svg
+[crates-url]: https://crates.io/crates/fiffi
+[docs-image]: https://img.shields.io/docsrs/fiffi.svg
+[docs-link]: https://docs.rs/fiffi/
 [apache-badge]: https://img.shields.io/badge/license-Apache%20License%202.0-blue
 [apache-url]: ./LICENSE-APACHE
 [mit-badge]: https://img.shields.io/badge/license-MIT-blue.svg
 [mit-url]: ./LICENSE-MIT
+[build-image]: https://github.com/emiltayl/fiffi/actions/workflows/tests.yml/badge.svg
+[build-link]: https://github.com/emiltayl/fiffi/actions/workflows/tests.yml
