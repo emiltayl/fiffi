@@ -655,7 +655,7 @@ mod tests {
         fn ffi_type() -> Type {
             // SAFETY: `create_struct` will return a `Type` if the input `Vec` is not empty.
             unsafe {
-                Type::create_struct(vec![
+                Type::create_struct_unchecked(vec![
                     Type::I8,
                     Type::U16,
                     Type::I32,
@@ -665,7 +665,6 @@ mod tests {
                     Type::Pointer,
                     SubStruct::ffi_type(),
                 ])
-                .unwrap_unchecked()
             }
         }
     }
@@ -678,7 +677,7 @@ mod tests {
     unsafe impl FfiType for SubStruct {
         fn ffi_type() -> Type {
             // SAFETY: `create_struct` will return a `Type` if the input `Vec` is not empty.
-            unsafe { Type::create_struct(vec![Type::F32, Type::I16]).unwrap_unchecked() }
+            unsafe { Type::create_struct_unchecked(vec![Type::F32, Type::I16]) }
         }
     }
 
