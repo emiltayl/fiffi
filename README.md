@@ -6,6 +6,8 @@
 [![MIT licensed][mit-badge]][mit-url]
 [![Build Status][build-image]][build-link]
 
+**This is a project branch attempting to rewrite fiffi without libffi. See [`no-libffi.md`] for more information.**
+
 `fiffi` (*\[fi\`f:i]*) provides Rust bindings for [`libffi`]. [`libffi-rs`] already provides Rust
 bindings for `libffi`, but `fiffi` aims to provide more ergonomic bindings that makes it easier to
 avoid safety issues when using functionality provided by `libffi`.
@@ -205,6 +207,7 @@ Development currently occurs mainly on x86_64 Linux and Windows.
 [`libffi-sys-rs`]: https://crates.io/crates/libffi-sys/
 [`miri`]: https://github.com/rust-lang/miri/
 [`deno`]: https://github.com/denoland/deno/
+[`no-libffi.md`]: ./no-libffi.md
 [`libffi-rs-2-fiffi.md`]: ./libffi-rs-2-fiffi.md
 [`Function`]: https://docs.rs/fiffi/latest/fiffi/function/struct.Function.html
 [`Closure`]: https://docs.rs/fiffi/latest/fiffi/closure/struct.Closure.html
