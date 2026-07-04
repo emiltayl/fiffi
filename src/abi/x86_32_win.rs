@@ -1,10 +1,26 @@
 //! ABI definitions for Windows on 32-bit x86 based on
 //! <https://github.com/libffi/libffi/blob/3276df05a758f8081adb6a910abf8de627ebda46/src/x86/ffitarget.h#L101>
 
+#[cfg(not(docsrs))]
 use libffi_sys::{
     ffi_abi_FFI_FASTCALL, ffi_abi_FFI_MS_CDECL, ffi_abi_FFI_PASCAL, ffi_abi_FFI_REGISTER,
     ffi_abi_FFI_STDCALL, ffi_abi_FFI_SYSV, ffi_abi_FFI_THISCALL,
 };
+
+#[cfg(docsrs)]
+const ffi_abi_FFI_FASTCALL: libffi_sys::ffi_abi = 4;
+#[cfg(docsrs)]
+const ffi_abi_FFI_MS_CDECL: libffi_sys::ffi_abi = 5;
+#[cfg(docsrs)]
+const ffi_abi_FFI_MS_PASCAL: libffi_sys::ffi_abi = 6;
+#[cfg(docsrs)]
+const ffi_abi_FFI_MS_REGISTER: libffi_sys::ffi_abi = 7;
+#[cfg(docsrs)]
+const ffi_abi_FFI_MS_STDCALL: libffi_sys::ffi_abi = 2;
+#[cfg(docsrs)]
+const ffi_abi_FFI_MS_SYSV: libffi_sys::ffi_abi = 1;
+#[cfg(docsrs)]
+const ffi_abi_FFI_MS_THISCALL: libffi_sys::ffi_abi = 3;
 
 #[cfg(not(docsrs))]
 use super::Abi;

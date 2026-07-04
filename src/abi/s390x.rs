@@ -1,7 +1,11 @@
 //! ABI definitions for s390x based on
 //! <https://github.com/libffi/libffi/blob/3276df05a758f8081adb6a910abf8de627ebda46/src/s390/ffitarget.h#L47>
 
+#[cfg(not(docsrs))]
 use libffi_sys::ffi_abi_FFI_SYSV;
+
+#[cfg(docsrs)]
+const ffi_abi_FFI_SYSV: libffi_sys::ffi_abi = 1;
 
 #[cfg(not(docsrs))]
 use super::Abi;

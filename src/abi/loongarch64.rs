@@ -1,7 +1,15 @@
 //! ABI definitions for Loongarch64 based on
 //! <https://github.com/libffi/libffi/blob/3276df05a758f8081adb6a910abf8de627ebda46/src/loongarch64/ffitarget.h#L47>
 
+#[cfg(not(docsrs))]
 use libffi_sys::{ffi_abi_FFI_LP64D, ffi_abi_FFI_LP64F, ffi_abi_FFI_LP64S};
+
+#[cfg(docsrs)]
+const ffi_abi_FFI_LP64D: libffi_sys::ffi_abi = 3;
+#[cfg(docsrs)]
+const ffi_abi_FFI_LP64F: libffi_sys::ffi_abi = 2;
+#[cfg(docsrs)]
+const ffi_abi_FFI_LP64S: libffi_sys::ffi_abi = 1;
 
 #[cfg(not(docsrs))]
 use super::Abi;

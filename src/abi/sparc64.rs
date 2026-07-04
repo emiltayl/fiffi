@@ -1,7 +1,11 @@
 //! ABI definitions based on
 //! <https://github.com/libffi/libffi/blob/3276df05a758f8081adb6a910abf8de627ebda46/src/sparc/ffitarget.h#L49>
 
+#[cfg(not(docsrs))]
 use libffi_sys::ffi_abi_FFI_V9;
+
+#[cfg(docsrs)]
+const ffi_abi_FFI_V9: libffi_sys::ffi_abi = 1;
 
 #[cfg(not(docsrs))]
 use super::Abi;

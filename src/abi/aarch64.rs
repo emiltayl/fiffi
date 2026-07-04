@@ -1,7 +1,13 @@
 //! ABI definitions for aarch64 based on
 //! <https://github.com/libffi/libffi/blob/3276df05a758f8081adb6a910abf8de627ebda46/src/aarch64/ffitarget.h#L44>
 
+#[cfg(not(docsrs))]
 use libffi_sys::{ffi_abi_FFI_SYSV, ffi_abi_FFI_WIN64};
+
+#[cfg(docsrs)]
+const ffi_abi_FFI_SYSV: libffi_sys::ffi_abi = 1;
+#[cfg(docsrs)]
+const ffi_abi_FFI_WIN64: libffi_sys::ffi_abi = 2;
 
 #[cfg(not(docsrs))]
 use super::Abi;
