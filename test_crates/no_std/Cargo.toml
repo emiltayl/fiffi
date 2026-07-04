@@ -1,0 +1,12 @@
+[package]
+name = "no_std"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[profile.dev]
+panic = "abort"
+
+[dependencies]
+dlmalloc = { version = "0.2.14", features = ["global"] }
+fiffi = { path = "../../" }

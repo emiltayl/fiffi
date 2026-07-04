@@ -1,0 +1,58 @@
+[package]
+name = "fiffi"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+categories = ["no-std", "development-tools::ffi"]
+description = "Rust bindings for libffi, alternative to libffi-rs"
+keywords = ["ffi", "libffi", "abi", "closure"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/emiltayl/fiffi/"
+exclude = ["/test_crates", "/scripts"]
+
+[dependencies]
+libffi-sys = { version = "4.2.0", default-features = false }
+
+[features]
+default = ["closure"]
+closure = []
+check_only = ["libffi-sys/check_only"]
+system = ["libffi-sys/system"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(msan)'] }
+deprecated_safe = { level = "deny", priority = 1 } 
+macro_use_extern_crate = "deny"
+missing_abi = "warn"
+missing_docs = "warn"
+missing_unsafe_on_extern = "warn"
+non_ascii_idents = "deny"
+redundant_imports = "warn"
+unit_bindings = "warn"
+unused_qualifications = "warn"
+variant-size-differences = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = 2 }
+struct_field_names = { level = "allow", priority = 6 }
+must_use_candidate = { level = "allow", priority = 9 }
+# This crate only compares floats directly to test static, pre-defined values.
+float_cmp = { level = "allow", priority = 10}
+cargo = { level = "warn", priority = 3 }
+
+# Restrictions
+allow_attributes_without_reason = "warn"
+clone_on_ref_ptr = "warn"
+create_dir = "warn"
+dbg_macro = "warn"
+deref_by_slicing = "warn"
+empty_drop = "deny"
+empty_enum_variants_with_brackets = "deny"
+empty_structs_with_brackets = "deny"
+error_impl_error = "deny"
+redundant_type_annotations = "warn"
+semicolon_inside_block = "warn"
+undocumented_unsafe_blocks = "warn"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+unneeded_field_pattern = "warn"

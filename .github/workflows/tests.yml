@@ -1,0 +1,157 @@
+name: Tests
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.target.triple }}
+    runs-on: ${{ matrix.target.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - runner: macos-26-intel
+            triple: x86_64-apple-darwin
+          - runner: macos-latest
+            triple: aarch64-apple-darwin
+          - runner: ubuntu-latest
+            triple: i686-unknown-linux-gnu
+            aptinstall: gcc-i686-linux-gnu
+            linker_env: CARGO_TARGET_I686_UNKNOWN_LINUX_GNU_LINKER
+            linker: i686-linux-gnu-gcc
+          - runner: ubuntu-latest
+            triple: x86_64-unknown-linux-gnu
+          - runner: ubuntu-latest
+            triple: x86_64-unknown-linux-musl
+            aptinstall: musl-tools musl-dev
+            musl_linux_headers: true
+            no_std_rustflags: "-C link-arg=-lc"
+          - runner: ubuntu-24.04-arm
+            triple: aarch64-unknown-linux-gnu
+            no_std_rustflags: "-C link-arg=-lgcc"
+          - runner: windows-latest
+            triple: i686-pc-windows-gnu
+            shell: msys2 {0}
+            msys2:
+              msystem: MINGW32
+              install: mingw-w64-i686-gcc
+              release: false
+          - runner: windows-latest
+            triple: i686-pc-windows-msvc
+            shell: pwsh
+          - runner: windows-latest
+            triple: x86_64-pc-windows-gnu
+            shell: msys2 {0}
+            msys2:
+              msystem: MINGW64
+              install: mingw-w64-x86_64-gcc
+              release: false
+          - runner: windows-latest
+            triple: x86_64-pc-windows-gnullvm
+            shell: msys2 {0}
+            msys2:
+              msystem: CLANG64
+              install: mingw-w64-clang-x86_64-clang
+              release: false
+          - runner: windows-latest
+            triple: x86_64-pc-windows-msvc
+            shell: pwsh
+          - runner: windows-11-arm
+            triple: aarch64-pc-windows-gnullvm
+            shell: msys2 {0}
+            msys2:
+              msystem: CLANGARM64
+              install: mingw-w64-clang-aarch64-clang
+              release: true
+          - runner: windows-11-arm
+            triple: aarch64-pc-windows-msvc
+            shell: pwsh
+
+    defaults:
+      run:
+        shell: ${{ matrix.target.shell || 'bash' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install additional packages
+        if: ${{ matrix.target.aptinstall }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.target.aptinstall }}
+
+      - name: Configure musl Linux header search path
+        if: ${{ matrix.target.musl_linux_headers }}
+        run: |
+          multiarch="$(gcc -print-multiarch)"
+          echo "CFLAGS=${CFLAGS:+$CFLAGS }-idirafter /usr/include -idirafter /usr/include/$multiarch" >> "$GITHUB_ENV"
+
+      - name: Setup MSYS2
+        if: ${{ matrix.target.msys2 != null }}
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        with:
+          msystem: ${{ matrix.target.msys2.msystem }}
+          install: ${{ matrix.target.msys2.install }}
+          path-type: inherit
+          release: ${{ matrix.target.msys2.release }}
+
+      - name: Configure target linker
+        if: ${{ matrix.target.linker }}
+        run: echo "${{ matrix.target.linker_env }}=${{ matrix.target.linker }}" >> "$GITHUB_ENV"
+
+      - name: Install Rust MSRV
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # 2026-06-21
+        with:
+          toolchain: "1.93"
+          targets: ${{ matrix.target.triple }}
+
+      - name: Run tests with MSRV
+        run: cargo test --target ${{ matrix.target.triple }}
+
+      - name: Run no_std test crate with MSRV
+        env:
+          RUSTFLAGS: ${{ matrix.target.no_std_rustflags }}
+        run: cargo run --manifest-path test_crates/no_std/Cargo.toml --target ${{ matrix.target.triple }}
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # 2026-06-21
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target.triple }}
+
+      - name: Run tests with stable
+        run: cargo test --target ${{ matrix.target.triple }}
+
+      - name: Run no_std test crate with stable
+        env:
+          RUSTFLAGS: ${{ matrix.target.no_std_rustflags }}
+        run: cargo run --manifest-path test_crates/no_std/Cargo.toml --target ${{ matrix.target.triple }}
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # 2026-06-21
+        with:
+          toolchain: nightly
+          targets: ${{ matrix.target.triple }}
+
+      - name: Run tests with nightly
+        run: cargo test --target ${{ matrix.target.triple }}
+
+      - name: Run no_std test crate with nightly
+        env:
+          RUSTFLAGS: ${{ matrix.target.no_std_rustflags }}
+        run: cargo run --manifest-path test_crates/no_std/Cargo.toml --target ${{ matrix.target.triple }}

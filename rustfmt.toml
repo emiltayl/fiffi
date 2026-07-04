@@ -1,0 +1,7 @@
+comment_width = 100
+format_code_in_doc_comments = true
+imports_granularity = "Module"
+newline_style = "Unix"
+group_imports = "StdExternalCrate"
+wrap_comments = true
+skip_macro_invocations = ["impl_callback_for_fn"]

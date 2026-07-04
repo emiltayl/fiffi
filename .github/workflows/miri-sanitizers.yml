@@ -1,0 +1,88 @@
+name: Miri and sanitizers
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # 2026-06-21
+        with:
+          toolchain: nightly
+          components: miri, rust-src
+
+      - name: Run Miri tests
+        run: scripts/miri-test.sh
+
+  sanitizers:
+    name: ${{ matrix.sanitizer.name }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer:
+          - name: AddressSanitizer
+            rust_test_threads: "1"
+            rustflags: -Zsanitizer=address
+            rustdocflags: -Zsanitizer=address
+            cflags: -fsanitize=address -g
+          - name: LeakSanitizer
+            rust_test_threads: "1"
+            rustflags: -Zsanitizer=leak
+            rustdocflags: -Zsanitizer=leak
+            cflags: -fsanitize=leak -g
+          - name: MemorySanitizer
+            rust_test_threads: "1"
+            rustflags: -Zsanitizer=memory -Zsanitizer-memory-track-origins -Cforce-frame-pointers=yes --cfg msan
+            rustdocflags: -Zsanitizer=memory -Zsanitizer-memory-track-origins -Cforce-frame-pointers=yes --cfg msan
+            cflags: -fsanitize=memory -fsanitize-memory-track-origins -g -fno-omit-frame-pointer
+          - name: ThreadSanitizer
+            rust_test_threads: ""
+            rustflags: -Zsanitizer=thread
+            rustdocflags: -Zsanitizer=thread
+            cflags: -fsanitize=thread -g
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@67ef31d5b988238dd797d409d6f9574278e20537 # 2026-06-21
+        with:
+          toolchain: nightly
+          components: rust-src
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Run ${{ matrix.sanitizer.name }}
+        env:
+          SANITIZER_RUST_TEST_THREADS: ${{ matrix.sanitizer.rust_test_threads }}
+          RUSTFLAGS: ${{ matrix.sanitizer.rustflags }}
+          RUSTDOCFLAGS: ${{ matrix.sanitizer.rustdocflags }}
+          CC: clang-18
+          CFLAGS: ${{ matrix.sanitizer.cflags }}
+        run: |
+          if [ -n "$SANITIZER_RUST_TEST_THREADS" ]; then
+            export RUST_TEST_THREADS="$SANITIZER_RUST_TEST_THREADS"
+          fi
+
+          cargo +nightly test -Zbuild-std --target=x86_64-unknown-linux-gnu
