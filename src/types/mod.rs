@@ -26,9 +26,9 @@ pub(crate) mod internal {
     use super::Vec;
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-    pub struct StructTypeVec(Vec<Type>);
+    pub struct NonEmptyVec(Vec<Type>);
 
-    impl StructTypeVec {
+    impl NonEmptyVec {
         pub fn new(types: Vec<Type>) -> Option<Self> {
             if types.is_empty() {
                 None
@@ -113,14 +113,14 @@ pub enum Type {
     /// A `Type::Struct` must be created using [`Type::create_struct`] or
     /// [`Type::create_struct_from_slice`]. This ensures that the struct is not empty, as empty
     /// structs are not supported by fiffi.
-    Struct(internal::StructTypeVec),
+    Struct(internal::NonEmptyVec),
 
     /// C-compatible union with at least one variant.
     ///
     /// A `Type::Union` must be created using [`Type::create_union`] or
     /// [`Type::create_union_from_slice`]. This ensures that the union is not empty, as empty
     /// unions are not supported by fiffi.
-    Union(internal::StructTypeVec),
+    Union(internal::NonEmptyVec),
 }
 
 /// A type description that can be used for variadic arguments.
@@ -169,14 +169,14 @@ pub enum VariadicType {
     /// A `VariadicType::Struct` must be created using [`VariadicType::create_struct`] or
     /// [`VariadicType::create_struct_from_slice`]. This ensures that the struct is not empty, as
     /// empty structs are not supported by fiffi.
-    Struct(internal::StructTypeVec),
+    Struct(internal::NonEmptyVec),
 
     /// C-compatible union with at least one variant.
     ///
     /// A `Type::Union` must be created using [`VariadicType::create_union`] or
     /// [`VariadicType::create_union_from_slice`]. This ensures that the union is not empty, as
     /// empty unions are not supported by fiffi.
-    Union(internal::StructTypeVec),
+    Union(internal::NonEmptyVec),
 }
 
 /// Size and alignment used by fiffi for a [`Type`].
@@ -219,7 +219,7 @@ impl Type {
     /// # Ok::<(), fiffi::errors::EmptyStructError>(())
     /// ```
     pub fn create_struct(types: Vec<Type>) -> Result<Self, EmptyStructError> {
-        internal::StructTypeVec::new(types)
+        internal::NonEmptyVec::new(types)
             .map(Self::Struct)
             .ok_or(EmptyStructError)
     }
@@ -235,6 +235,16 @@ impl Type {
         Self::create_struct(types.to_vec())
     }
 
+    pub fn create_union(types: Vec<Type>) -> Result<Self, EmptyStructError> {
+        internal::NonEmptyVec::new(types)
+            .map(Self::Union)
+            .ok_or(EmptyStructError)
+    }
+
+    pub fn create_union_from_slice(types: &[Type]) -> Result<Self, EmptyStructError> {
+        Self::create_union(types.to_vec())
+    }
+
     /// Unchecked version of [`Type::create_struct`] to create a `Type::Struct` without performing
     /// any checks.
     ///
@@ -244,7 +254,7 @@ impl Type {
     /// cause undefined behavior.
     pub unsafe fn create_struct_unchecked(types: Vec<Type>) -> Self {
         // SAFETY: It is up to the caller to uphold safety requirements.
-        unsafe { Self::Struct(internal::StructTypeVec::new_unchecked(types)) }
+        unsafe { Self::Struct(internal::NonEmptyVec::new_unchecked(types)) }
     }
 
     /// Unchecked version of [`Type::create_struct_from_slice`] to create a `Type::Struct` without
@@ -257,6 +267,16 @@ impl Type {
     pub unsafe fn create_struct_from_slice_unchecked(types: &[Type]) -> Self {
         // SAFETY: It is up to the caller to uphold safety requirements.
         unsafe { Self::create_struct_unchecked(types.to_vec()) }
+    }
+
+    pub unsafe fn create_union_unchecked(types: Vec<Type>) -> Self {
+        // SAFETY: It is up to the caller to uphold safety requirements.
+        unsafe { Self::Union(internal::NonEmptyVec::new_unchecked(types)) }
+    }
+
+    pub unsafe fn create_union_from_slice_unchecked(types: &[Type]) -> Self {
+        // SAFETY: It is up to the caller to uphold safety requirements.
+        unsafe { Self::create_union_unchecked(types.to_vec()) }
     }
 
     pub fn layout(&self) -> FfiTypeLayout {
@@ -279,7 +299,7 @@ impl VariadicType {
     /// Returns [`EmptyStructError`] if `types` is empty. libffi does not support empty struct type
     /// descriptions.
     pub fn create_struct(types: Vec<Type>) -> Result<Self, EmptyStructError> {
-        internal::StructTypeVec::new(types)
+        internal::NonEmptyVec::new(types)
             .map(Self::Struct)
             .ok_or(EmptyStructError)
     }
@@ -295,6 +315,16 @@ impl VariadicType {
         Self::create_struct(types.to_vec())
     }
 
+    pub fn create_union(types: Vec<Type>) -> Result<Self, EmptyStructError> {
+        internal::NonEmptyVec::new(types)
+            .map(Self::Union)
+            .ok_or(EmptyStructError)
+    }
+
+    pub fn create_union_from_slice(types: &[Type]) -> Result<Self, EmptyStructError> {
+        Self::create_union(types.to_vec())
+    }
+
     /// Unchecked version of [`VariadicType::create_struct`] to create a `VariadicType::Struct`
     /// without performing any checks.
     ///
@@ -304,7 +334,7 @@ impl VariadicType {
     /// cause undefined behavior.
     pub unsafe fn create_struct_unchecked(types: Vec<Type>) -> Self {
         // SAFETY: It is up to the caller to uphold safety requirements.
-        unsafe { Self::Struct(internal::StructTypeVec::new_unchecked(types)) }
+        unsafe { Self::Struct(internal::NonEmptyVec::new_unchecked(types)) }
     }
 
     /// Unchecked version of [`VariadicType::create_struct_from_slice`] to create a
@@ -317,6 +347,16 @@ impl VariadicType {
     pub unsafe fn create_struct_from_slice_unchecked(types: &[Type]) -> Self {
         // SAFETY: It is up to the caller to uphold safety requirements.
         unsafe { Self::create_struct_unchecked(types.to_vec()) }
+    }
+
+    pub unsafe fn create_union_unchecked(types: Vec<Type>) -> Self {
+        // SAFETY: It is up to the caller to uphold safety requirements.
+        unsafe { Self::Union(internal::NonEmptyVec::new_unchecked(types)) }
+    }
+
+    pub unsafe fn create_union_from_slice_unchecked(types: &[Type]) -> Self {
+        // SAFETY: It is up to the caller to uphold safety requirements.
+        unsafe { Self::create_union_unchecked(types.to_vec()) }
     }
 
     /// Convert a `&VariadicType` to a `Type`.
