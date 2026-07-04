@@ -18,10 +18,10 @@ pub struct Abi(libffi_sys::ffi_abi);
 
 impl Abi {
     /// Standard AArch64 procedure call ABI.
-    pub const SYSV: Self = Abi(ffi_abi_FFI_SYSV);
+    pub const SYSV: Self = Self(ffi_abi_FFI_SYSV);
 
     /// Windows AArch64 ABI.
-    pub const WIN64: Self = Abi(ffi_abi_FFI_WIN64);
+    pub const WIN64: Self = Self(ffi_abi_FFI_WIN64);
 
     #[cfg(test)]
     #[doc(hidden)]

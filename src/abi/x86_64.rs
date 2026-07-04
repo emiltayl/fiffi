@@ -12,13 +12,13 @@ pub struct Abi(libffi_sys::ffi_abi);
 
 impl Abi {
     /// System V ABI
-    pub const UNIX64: Self = Abi(ffi_abi_FFI_UNIX64);
+    pub const UNIX64: Self = Self(ffi_abi_FFI_UNIX64);
 
     /// Windows ABI
-    pub const WIN64: Self = Abi(ffi_abi_FFI_WIN64);
+    pub const WIN64: Self = Self(ffi_abi_FFI_WIN64);
 
     /// GNU Windows ABI
-    pub const GNUW64: Self = Abi(ffi_abi_FFI_GNUW64);
+    pub const GNUW64: Self = Self(ffi_abi_FFI_GNUW64);
 
     /// UEFI ABI
     pub const EFI64: Self = Self::WIN64;

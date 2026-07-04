@@ -18,10 +18,10 @@ pub struct Abi(libffi_sys::ffi_abi);
 
 impl Abi {
     /// Default ARM ABI on systems without hardware floats.
-    pub const SYSV: Self = Abi(ffi_abi_FFI_SYSV);
+    pub const SYSV: Self = Self(ffi_abi_FFI_SYSV);
 
     /// ARM VFP ABI, used as the default on ARM targets with hard(ware) floats.
-    pub const VFP: Self = Abi(ffi_abi_FFI_VFP);
+    pub const VFP: Self = Self(ffi_abi_FFI_VFP);
 
     #[cfg(test)]
     #[doc(hidden)]

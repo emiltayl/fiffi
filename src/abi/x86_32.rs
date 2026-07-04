@@ -10,17 +10,17 @@ use libffi_sys::{
 #[cfg(docsrs)]
 const ffi_abi_FFI_FASTCALL: libffi_sys::ffi_abi = 4;
 #[cfg(docsrs)]
-const ffi_abi_FFI_MS_CDECL: libffi_sys::ffi_abi = 5;
+const ffi_abi_FFI_MS_CDECL: libffi_sys::ffi_abi = 8;
 #[cfg(docsrs)]
-const ffi_abi_FFI_MS_PASCAL: libffi_sys::ffi_abi = 6;
+const ffi_abi_FFI_PASCAL: libffi_sys::ffi_abi = 6;
 #[cfg(docsrs)]
-const ffi_abi_FFI_MS_REGISTER: libffi_sys::ffi_abi = 7;
+const ffi_abi_FFI_REGISTER: libffi_sys::ffi_abi = 7;
 #[cfg(docsrs)]
-const ffi_abi_FFI_MS_STDCALL: libffi_sys::ffi_abi = 8;
+const ffi_abi_FFI_STDCALL: libffi_sys::ffi_abi = 5;
 #[cfg(docsrs)]
-const ffi_abi_FFI_MS_SYSV: libffi_sys::ffi_abi = 1;
+const ffi_abi_FFI_SYSV: libffi_sys::ffi_abi = 1;
 #[cfg(docsrs)]
-const ffi_abi_FFI_MS_THISCALL: libffi_sys::ffi_abi = 3;
+const ffi_abi_FFI_THISCALL: libffi_sys::ffi_abi = 3;
 
 #[cfg(not(docsrs))]
 use super::Abi;

@@ -16,7 +16,7 @@ pub struct Abi(libffi_sys::ffi_abi);
 
 impl Abi {
     /// Default ABI for this target.
-    pub const SYSV: Self = Abi(ffi_abi_FFI_SYSV);
+    pub const SYSV: Self = Self(ffi_abi_FFI_SYSV);
 
     #[cfg(test)]
     #[doc(hidden)]

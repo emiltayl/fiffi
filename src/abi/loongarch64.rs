@@ -20,13 +20,13 @@ pub struct Abi(libffi_sys::ffi_abi);
 
 impl Abi {
     /// LP64 soft-float ABI.
-    pub const LP64S: Self = Abi(ffi_abi_FFI_LP64S);
+    pub const LP64S: Self = Self(ffi_abi_FFI_LP64S);
 
     /// LP64 single-precision floating-point ABI.
-    pub const LP64F: Self = Abi(ffi_abi_FFI_LP64F);
+    pub const LP64F: Self = Self(ffi_abi_FFI_LP64F);
 
     /// LP64 double-precision floating-point ABI.
-    pub const LP64D: Self = Abi(ffi_abi_FFI_LP64D);
+    pub const LP64D: Self = Self(ffi_abi_FFI_LP64D);
 
     #[cfg(test)]
     #[doc(hidden)]

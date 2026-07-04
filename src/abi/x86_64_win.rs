@@ -12,10 +12,10 @@ pub struct Abi(libffi_sys::ffi_abi);
 
 impl Abi {
     /// Windows x64 ABI.
-    pub const WIN64: Self = Abi(ffi_abi_FFI_WIN64);
+    pub const WIN64: Self = Self(ffi_abi_FFI_WIN64);
 
     /// GNU Windows x64 ABI.
-    pub const GNUW64: Self = Abi(ffi_abi_FFI_GNUW64);
+    pub const GNUW64: Self = Self(ffi_abi_FFI_GNUW64);
 
     /// Native Windows system ABI for 64-bit x86.
     pub const SYSTEM: Self = Self::WIN64;

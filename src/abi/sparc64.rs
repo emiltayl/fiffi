@@ -16,7 +16,7 @@ pub struct Abi(libffi_sys::ffi_abi);
 
 impl Abi {
     /// Default ABI for this target.
-    pub const V9: Self = Abi(ffi_abi_FFI_V9);
+    pub const V9: Self = Self(ffi_abi_FFI_V9);
 
     #[cfg(test)]
     #[doc(hidden)]
