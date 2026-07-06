@@ -10,7 +10,7 @@ ABIs on common platforms, and then branch out from there as needed.
 
 # Plan
 
-* [ ] `Type` size and layout functionality
+* [x] `Type` size and layout functionality
 * [ ] Comprehensive test suite for function calls
 * [ ] 64-bit x86 SysV ABI for function calls
   * [ ] Argument, return value classification
@@ -25,3 +25,4 @@ ABIs on common platforms, and then branch out from there as needed.
 # Work log
 
 * 2026-07-04 Started this document
+* 2026-07-06 Added union support to `Type` and implemented layout and offset calculation for `Type`.

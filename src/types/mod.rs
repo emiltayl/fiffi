@@ -17,6 +17,7 @@ extern crate alloc;
 
 #[cfg(not(test))]
 use alloc::vec::Vec;
+use core::ffi::c_void;
 
 use crate::errors::{EmptyStructError, InvalidVariadicTypeError};
 
@@ -193,6 +194,16 @@ pub struct FfiTypeLayout {
     pub size: usize,
 }
 
+/// Calculate the padding needed to `size` to align with `align`.
+fn padding_needed(size: usize, align: usize) -> usize {
+    let remainder = size % align;
+    if remainder == 0 {
+        0
+    } else {
+        align - remainder
+    }
+}
+
 impl Type {
     /// Creates a `Type::Struct` from member types in field order.
     ///
@@ -280,11 +291,117 @@ impl Type {
     }
 
     pub fn layout(&self) -> FfiTypeLayout {
-        todo!();
+        match self {
+            Type::I8 => FfiTypeLayout {
+                align: align_of::<i8>(),
+                size: size_of::<i8>(),
+            },
+            Type::U8 => FfiTypeLayout {
+                align: align_of::<u8>(),
+                size: size_of::<u8>(),
+            },
+            Type::I16 => FfiTypeLayout {
+                align: align_of::<i16>(),
+                size: size_of::<i16>(),
+            },
+            Type::U16 => FfiTypeLayout {
+                align: align_of::<u16>(),
+                size: size_of::<u16>(),
+            },
+            Type::I32 => FfiTypeLayout {
+                align: align_of::<i32>(),
+                size: size_of::<i32>(),
+            },
+            Type::U32 => FfiTypeLayout {
+                align: align_of::<u32>(),
+                size: size_of::<u32>(),
+            },
+            Type::I64 => FfiTypeLayout {
+                align: align_of::<i64>(),
+                size: size_of::<i64>(),
+            },
+            Type::U64 => FfiTypeLayout {
+                align: align_of::<u64>(),
+                size: size_of::<u64>(),
+            },
+            Type::I128 => FfiTypeLayout {
+                align: align_of::<i128>(),
+                size: size_of::<i128>(),
+            },
+            Type::U128 => FfiTypeLayout {
+                align: align_of::<u128>(),
+                size: size_of::<u128>(),
+            },
+            Type::Isize => FfiTypeLayout {
+                align: align_of::<isize>(),
+                size: size_of::<isize>(),
+            },
+            Type::Usize => FfiTypeLayout {
+                align: align_of::<usize>(),
+                size: size_of::<usize>(),
+            },
+            Type::F32 => FfiTypeLayout {
+                align: align_of::<f32>(),
+                size: size_of::<f32>(),
+            },
+            Type::F64 => FfiTypeLayout {
+                align: align_of::<f64>(),
+                size: size_of::<f64>(),
+            },
+            Type::Pointer => FfiTypeLayout {
+                align: align_of::<*const c_void>(),
+                size: size_of::<*const c_void>(),
+            },
+            Type::Struct(type_vec) => {
+                let mut layout = FfiTypeLayout { align: 1, size: 0 };
+
+                for field in type_vec.as_vec() {
+                    let field_layout = field.layout();
+
+                    layout.size += padding_needed(layout.size, field_layout.align);
+                    layout.size += field_layout.size;
+                    layout.align = layout.align.max(field_layout.align);
+                }
+
+                layout.size += padding_needed(layout.size, layout.align);
+
+                layout
+            }
+            Type::Union(type_vec) => {
+                let mut layout = FfiTypeLayout { align: 1, size: 0 };
+
+                for field in type_vec.as_vec() {
+                    let field_layout = field.layout();
+
+                    layout.align = layout.align.max(field_layout.align);
+                    layout.size = layout.size.max(field_layout.size);
+                }
+
+                layout.size += padding_needed(layout.size, layout.align);
+
+                layout
+            }
+        }
     }
 
     pub fn field_offsets(&self) -> Vec<usize> {
-        todo!();
+        // TODO benchmark whether it is worth it to combine `Type::layout` and `Type::field_offsets`
+        // for structs to avoid iterating over fields twice.
+        if let Type::Struct(type_vec) = self {
+            let mut offsets = Vec::with_capacity(type_vec.as_vec().len());
+            let mut offset = 0;
+
+            for field in type_vec.as_vec() {
+                let field_layout = field.layout();
+                offset += padding_needed(offset, field_layout.align);
+                offsets.push(offset);
+                offset += field_layout.size;
+            }
+
+            offsets
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -588,5 +705,118 @@ unsafe impl<T> FfiType for *const T {
 unsafe impl<T> FfiType for *mut T {
     fn ffi_type() -> Type {
         Type::Pointer
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::any::type_name;
+    use core::ffi::c_void;
+    use core::mem::offset_of;
+
+    use super::FfiType;
+    use crate::test_utils::structs::*;
+    use crate::test_utils::unions::*;
+
+    fn assert_ffi_layout<T: FfiType>() {
+        let layout = T::ffi_type().layout();
+
+        assert_eq!(
+            layout.align,
+            align_of::<T>(),
+            "alignment mismatch for {}",
+            type_name::<T>(),
+        );
+        assert_eq!(
+            layout.size,
+            size_of::<T>(),
+            "size mismatch for {}",
+            type_name::<T>(),
+        );
+    }
+
+    fn assert_field_offsets<T: FfiType>(expected: &[usize]) {
+        let offsets = T::ffi_type().field_offsets();
+
+        assert_eq!(
+            offsets.as_slice(),
+            expected,
+            "field offset mismatch for {}",
+            type_name::<T>(),
+        );
+    }
+
+    macro_rules! assert_ffi_layouts {
+        ($($type:ty),+ $(,)?) => {
+            $(assert_ffi_layout::<$type>();)+
+        };
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn aggregate_fixture_ffi_layouts_match_rust_layouts() {
+        assert_ffi_layouts!(
+            i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64, *const c_void,
+            U8, U8x3, U16x3, U32x2, U32x3, U32x4, U64, U64x2, U64x3, U64x4, U128, U128x2, F32,
+            F32x2, F32x3, F32x4, F64, F64x2, F64x3, F64x4, U64F64, F64U64, U32F32, F32x3U32,
+            U32F32x3, F64F32, U8U16, U8U64, U64U8, U8F64, U8F64U8, U32U64U32, U8U128, U128U8,
+            U8U128U8, NestedU8U32x2, NestedF32x2x2, NestedF64x2x2, NestedU8U64x2,
+            NestedUnionU32F32, NestedUnionU32F32x2, NestedU8UnionU64F64, NestedUnionU8U128U8,
+            NestedU8UnionU128U8, UsizePointer, UnionI32U32, UnionI64U64, UnionU128, UnionU8U128,
+            UnionU128U8, UnionU32F32, UnionU64F64, UnionNestedU8x3U64, UnionNestedU64x2,
+            UnionNestedF64x2, UnionNestedU8U16U64, UnionNestedU64F64, UnionNestedF32x4U32x4,
+            UnionNestedF64x2U64x2, UnionNestedF32x2U64, UnionNestedF64x4U64x4,
+            UnionNestedU64x4F64x4,
+        );
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn aggregate_fixture_field_offsets_match_rust_offsets() {
+        assert_field_offsets::<U8>(&[offset_of!(U8, a)]);
+        assert_field_offsets::<U8x3>(&[offset_of!(U8x3, a), offset_of!(U8x3, b), offset_of!(U8x3, c)]);
+        assert_field_offsets::<U16x3>(&[offset_of!(U16x3, a), offset_of!(U16x3, b), offset_of!(U16x3, c)]);
+        assert_field_offsets::<U32x2>(&[offset_of!(U32x2, a), offset_of!(U32x2, b)]);
+        assert_field_offsets::<U32x3>(&[offset_of!(U32x3, a), offset_of!(U32x3, b), offset_of!(U32x3, c)]);
+        assert_field_offsets::<U32x4>(&[offset_of!(U32x4, a), offset_of!(U32x4, b), offset_of!(U32x4, c), offset_of!(U32x4, d)]);
+        assert_field_offsets::<U64>(&[offset_of!(U64, a)]);
+        assert_field_offsets::<U64x2>(&[offset_of!(U64x2, a), offset_of!(U64x2, b)]);
+        assert_field_offsets::<U64x3>(&[offset_of!(U64x3, a), offset_of!(U64x3, b), offset_of!(U64x3, c)]);
+        assert_field_offsets::<U64x4>(&[offset_of!(U64x4, a), offset_of!(U64x4, b), offset_of!(U64x4, c), offset_of!(U64x4, d)]);
+        assert_field_offsets::<U128>(&[offset_of!(U128, a)]);
+        assert_field_offsets::<U128x2>(&[offset_of!(U128x2, a), offset_of!(U128x2, b)]);
+        assert_field_offsets::<F32>(&[offset_of!(F32, a)]);
+        assert_field_offsets::<F32x2>(&[offset_of!(F32x2, a), offset_of!(F32x2, b)]);
+        assert_field_offsets::<F32x3>(&[offset_of!(F32x3, a), offset_of!(F32x3, b), offset_of!(F32x3, c)]);
+        assert_field_offsets::<F32x4>(&[offset_of!(F32x4, a), offset_of!(F32x4, b), offset_of!(F32x4, c), offset_of!(F32x4, d)]);
+        assert_field_offsets::<F64>(&[offset_of!(F64, a)]);
+        assert_field_offsets::<F64x2>(&[offset_of!(F64x2, a), offset_of!(F64x2, b)]);
+        assert_field_offsets::<F64x3>(&[offset_of!(F64x3, a), offset_of!(F64x3, b), offset_of!(F64x3, c)]);
+        assert_field_offsets::<F64x4>(&[offset_of!(F64x4, a), offset_of!(F64x4, b), offset_of!(F64x4, c), offset_of!(F64x4, d)]);
+        assert_field_offsets::<U64F64>(&[offset_of!(U64F64, a), offset_of!(U64F64, b)]);
+        assert_field_offsets::<F64U64>(&[offset_of!(F64U64, a), offset_of!(F64U64, b)]);
+        assert_field_offsets::<U32F32>(&[offset_of!(U32F32, a), offset_of!(U32F32, b)]);
+        assert_field_offsets::<F32x3U32>(&[offset_of!(F32x3U32, a), offset_of!(F32x3U32, b), offset_of!(F32x3U32, c), offset_of!(F32x3U32, d)]);
+        assert_field_offsets::<U32F32x3>(&[offset_of!(U32F32x3, a), offset_of!(U32F32x3, b), offset_of!(U32F32x3, c), offset_of!(U32F32x3, d)]);
+        assert_field_offsets::<F64F32>(&[offset_of!(F64F32, a), offset_of!(F64F32, b)]);
+        assert_field_offsets::<U8U16>(&[offset_of!(U8U16, a), offset_of!(U8U16, b)]);
+        assert_field_offsets::<U8U64>(&[offset_of!(U8U64, a), offset_of!(U8U64, b)]);
+        assert_field_offsets::<U64U8>(&[offset_of!(U64U8, a), offset_of!(U64U8, b)]);
+        assert_field_offsets::<U8F64>(&[offset_of!(U8F64, a), offset_of!(U8F64, b)]);
+        assert_field_offsets::<U8F64U8>(&[ offset_of!(U8F64U8, a), offset_of!(U8F64U8, b), offset_of!(U8F64U8, c)]);
+        assert_field_offsets::<U32U64U32>(&[offset_of!(U32U64U32, a), offset_of!(U32U64U32, b), offset_of!(U32U64U32, c)]);
+        assert_field_offsets::<U8U128>(&[offset_of!(U8U128, a), offset_of!(U8U128, b)]);
+        assert_field_offsets::<U128U8>(&[offset_of!(U128U8, a), offset_of!(U128U8, b)]);
+        assert_field_offsets::<U8U128U8>(&[offset_of!(U8U128U8, a), offset_of!(U8U128U8, b), offset_of!(U8U128U8, c)]);
+        assert_field_offsets::<NestedU8U32x2>(&[offset_of!(NestedU8U32x2, tag), offset_of!(NestedU8U32x2, x)]);
+        assert_field_offsets::<NestedF32x2x2>(&[offset_of!(NestedF32x2x2, x), offset_of!(NestedF32x2x2, y)]);
+        assert_field_offsets::<NestedF64x2x2>(&[offset_of!(NestedF64x2x2, x), offset_of!(NestedF64x2x2, y)]);
+        assert_field_offsets::<NestedU8U64x2>(&[offset_of!(NestedU8U64x2, tag), offset_of!(NestedU8U64x2, x)]);
+        assert_field_offsets::<NestedUnionU32F32>(&[offset_of!(NestedUnionU32F32, x)]);
+        assert_field_offsets::<NestedUnionU32F32x2>(&[offset_of!(NestedUnionU32F32x2, x), offset_of!(NestedUnionU32F32x2, y)]);
+        assert_field_offsets::<NestedU8UnionU64F64>(&[offset_of!(NestedU8UnionU64F64, tag), offset_of!(NestedU8UnionU64F64, x)]);
+        assert_field_offsets::<NestedUnionU8U128U8>(&[offset_of!(NestedUnionU8U128U8, x), offset_of!(NestedUnionU8U128U8, tail)]);
+        assert_field_offsets::<NestedU8UnionU128U8>(&[offset_of!(NestedU8UnionU128U8, tag), offset_of!(NestedU8UnionU128U8, x)]);
+        assert_field_offsets::<UsizePointer>(&[offset_of!(UsizePointer, size), offset_of!(UsizePointer, pointer)]);
     }
 }
