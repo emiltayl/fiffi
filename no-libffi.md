@@ -11,18 +11,23 @@ ABIs on common platforms, and then branch out from there as needed.
 # Plan
 
 * [x] `Type` size and layout functionality
-* [ ] Comprehensive test suite for function calls
+* [x] Initial test suite for function calls
 * [ ] 64-bit x86 SysV ABI for function calls
   * [ ] Argument, return value classification
   * [ ] Plan for marshalling arguments
   * [ ] Assembly: argument marshalling, the call and return value handling
+* [ ] Support discarding return value, add tests for this
+* [ ] Take args by reference in `Function::call`
+* [ ] Review test suite for missing test cases
 * [ ] 64-bit x86 Win64 ABI for function calls
 * [ ] 32-bit x86 ABIs for function calls
 * [ ] Aarch64 ABIs for function calls
 * [ ] Review status
+* [ ] Variadic test suite (in C?) and support for variadics
 * [ ] Closures?
 
 # Work log
 
-* 2026-07-04 Started this document
+* 2026-07-10 Added function call test suite added with 308 failing tests.
 * 2026-07-06 Added union support to `Type` and implemented layout and offset calculation for `Type`.
+* 2026-07-04 Started this document

@@ -690,3 +690,6 @@ impl VariadicFunctionBuilder<FnPtrSet> {
         )
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -1,5 +1,5 @@
 //! Test unions used to test ffi behavior.
-//! 
+//!
 //! These unions implement `PartialEq` for test purposes. The `PartialEq` implementations must only
 //! be used to compare unions created from the static union ARGs defined in this module to ensure
 //! that the correct variant is compared. Comparing with unions constructed in other manners may
@@ -7,12 +7,13 @@
 //!
 //! Defined unions in declaration order:
 //! `UnionI32U32`, `UnionI64U64`, `UnionU128`, `UnionU8U128`, `UnionU128U8`, `UnionU32F32`,
-//! `UnionU64F64`, `UnionNestedU8x3U64`, `UnionNestedU64x2`, `UnionNestedF64x2`,
-//! `UnionNestedU8U16U64`, `UnionNestedU64F64`, `UnionNestedF32x4U32x4`, `UnionNestedF64x2U64x2`,
+//! `UnionU64F64`, `UnionNestedU8x3U64`, `UnionNestedU8x3F32x2`,
+//! `UnionNestedU16x3F64x2`, `UnionNestedU64x2`, `UnionNestedF64x2`, `UnionNestedU8U16U64`,
+//! `UnionNestedU64F64`, `UnionNestedF32x4U32x4`, `UnionNestedF64x2U64x2`,
 //! `UnionNestedF32x2U64`, `UnionNestedF64x4U64x4`, `UnionNestedU64x4F64x4`
 
 use crate::test_utils::structs::{
-    F32x2, F32x4, F64x2, F64x4, U32x4, U64x2, U64x4, U8x3, F64, U64, U8U16,
+    F32x2, F32x4, F64, F64x2, F64x4, U8U16, U8x3, U16x3, U32x4, U64, U64x2, U64x4,
 };
 use crate::types::{FfiType, Type};
 
@@ -167,6 +168,40 @@ pub static UNION_NESTED_U8X3_U64_ARG: UnionNestedU8x3U64 = UnionNestedU8x3U64 {
         a: 0x22,
         b: 0x23,
         c: 0x24,
+    },
+};
+
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub union UnionNestedU8x3F32x2 {
+    pub small: U8x3,
+    pub f: F32x2,
+}
+
+impl_ffi_union!(UnionNestedU8x3F32x2, U8x3::ffi_type(), F32x2::ffi_type());
+impl_union_partial_eq!(UnionNestedU8x3F32x2, f);
+
+pub static UNION_NESTED_U8X3_F32X2_ARG: UnionNestedU8x3F32x2 = UnionNestedU8x3F32x2 {
+    f: F32x2 {
+        a: f32::from_bits(0x3f80_0019),
+        b: f32::from_bits(0x3f80_001a),
+    },
+};
+
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub union UnionNestedU16x3F64x2 {
+    pub small: U16x3,
+    pub f: F64x2,
+}
+
+impl_ffi_union!(UnionNestedU16x3F64x2, U16x3::ffi_type(), F64x2::ffi_type());
+impl_union_partial_eq!(UnionNestedU16x3F64x2, f);
+
+pub static UNION_NESTED_U16X3_F64X2_ARG: UnionNestedU16x3F64x2 = UnionNestedU16x3F64x2 {
+    f: F64x2 {
+        a: f64::from_bits(0x3ff0_0000_0000_001e),
+        b: f64::from_bits(0x3ff0_0000_0000_001f),
     },
 };
 

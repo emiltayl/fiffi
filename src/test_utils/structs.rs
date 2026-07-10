@@ -1,17 +1,18 @@
 //! Test structs used to test ffi behavior.
 //!
 //! Defined structs in declaration order:
-//! `U8`, `U8x3`, `U16x3`, `U32x2`, `U32x3`, `U32x4`, `U64`, `U64x2`, `U64x3`, `U64x4`, `U128`,
-//! `U128x2`, `F32`, `F32x2`, `F32x3`, `F32x4`, `F64`, `F64x2`, `F64x3`, `F64x4`, `U64F64`,
-//! `F64U64`, `U32F32`, `F32x3U32`, `U32F32x3`, `F64F32`, `U8U16`, `U8U64`, `U64U8`, `U8F64`,
-//! `U8F64U8`, `U32U64U32`, `U8U128`, `U128U8`, `U8U128U8`, `NestedU8U32x2`, `NestedF32x2x2`,
-//! `NestedF64x2x2`, `NestedU8U64x2`, `NestedUnionU32F32`, `NestedUnionU32F32x2`,
-//! `NestedU8UnionU64F64`, `NestedUnionU8U128U8`, `NestedU8UnionU128U8`, `UsizePointer`
+//! `U8`, `U8x2`, `U8x3`, `U8x7`, `U8x15`, `U16x3`, `U32x2`, `U32x3`, `U32x4`, `U32x17`,
+//! `U64`, `U64x2`, `U64x3`, `U64x4`, `U128`, `U128x2`, `F32`, `F32x2`, `F32x3`, `F32x4`,
+//! `F64`, `F64x2`, `F64x3`, `F64x4`, `U64F64`, `F64U64`, `U32F32`, `F32x3U32`, `U32F32x3`,
+//! `F64F32`, `U8U16`, `U8U64`, `U64U8`, `U8F64`, `U8F64U8`, `U32U64U32`, `U8U128`, `U128U8`,
+//! `U8U128U8`, `NestedU8U32x2`, `NestedF32x2x2`, `NestedF64x2x2`, `NestedU8U64x2`,
+//! `NestedUnionU32F32`, `NestedUnionU32F32x2`, `NestedU8UnionU64F64`,
+//! `NestedUnionU8U128U8`, `NestedU8UnionU128U8`, `UsizePointer`
 
 use core::ffi::c_void;
 use core::ptr;
 
-use crate::test_utils::unions::{UnionU128U8, UnionU32F32, UnionU64F64, UnionU8U128};
+use crate::test_utils::unions::{UnionU8U128, UnionU32F32, UnionU64F64, UnionU128U8};
 use crate::types::{FfiType, Type};
 
 macro_rules! ffi_struct_type {
@@ -47,6 +48,17 @@ pub static U8_ARG: U8 = U8 { a: 0x11 };
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(C)]
+pub struct U8x2 {
+    pub a: u8,
+    pub b: u8,
+}
+
+impl_ffi_struct!(U8x2, Type::U8, Type::U8);
+
+pub static U8X2_ARG: U8x2 = U8x2 { a: 0x31, b: 0x32 };
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[repr(C)]
 pub struct U8x3 {
     pub a: u8,
     pub b: u8,
@@ -59,6 +71,96 @@ pub static U8X3_ARG: U8x3 = U8x3 {
     a: 0x12,
     b: 0x13,
     c: 0x14,
+};
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[repr(C)]
+pub struct U8x7 {
+    pub a: u8,
+    pub b: u8,
+    pub c: u8,
+    pub d: u8,
+    pub e: u8,
+    pub f: u8,
+    pub g: u8,
+}
+
+impl_ffi_struct!(
+    U8x7,
+    Type::U8,
+    Type::U8,
+    Type::U8,
+    Type::U8,
+    Type::U8,
+    Type::U8,
+    Type::U8
+);
+
+pub static U8X7_ARG: U8x7 = U8x7 {
+    a: 0x41,
+    b: 0x42,
+    c: 0x43,
+    d: 0x44,
+    e: 0x45,
+    f: 0x46,
+    g: 0x47,
+};
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[repr(C)]
+pub struct U8x15 {
+    pub a: u8,
+    pub b: u8,
+    pub c: u8,
+    pub d: u8,
+    pub e: u8,
+    pub f: u8,
+    pub g: u8,
+    pub h: u8,
+    pub i: u8,
+    pub j: u8,
+    pub k: u8,
+    pub l: u8,
+    pub m: u8,
+    pub n: u8,
+    pub o: u8,
+}
+
+impl_ffi_struct!(
+    U8x15,
+    Type::U8,
+    Type::U8,
+    Type::U8,
+    Type::U8,
+    Type::U8,
+    Type::U8,
+    Type::U8,
+    Type::U8,
+    Type::U8,
+    Type::U8,
+    Type::U8,
+    Type::U8,
+    Type::U8,
+    Type::U8,
+    Type::U8
+);
+
+pub static U8X15_ARG: U8x15 = U8x15 {
+    a: 0x51,
+    b: 0x52,
+    c: 0x53,
+    d: 0x54,
+    e: 0x55,
+    f: 0x56,
+    g: 0x57,
+    h: 0x58,
+    i: 0x59,
+    j: 0x5a,
+    k: 0x5b,
+    l: 0x5c,
+    m: 0x5d,
+    n: 0x5e,
+    o: 0x5f,
 };
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -123,6 +225,69 @@ pub static U32X4_ARG: U32x4 = U32x4 {
     b: 0x3000_0007,
     c: 0x3000_0008,
     d: 0x3000_0009,
+};
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[repr(C)]
+pub struct U32x17 {
+    pub a: u32,
+    pub b: u32,
+    pub c: u32,
+    pub d: u32,
+    pub e: u32,
+    pub f: u32,
+    pub g: u32,
+    pub h: u32,
+    pub i: u32,
+    pub j: u32,
+    pub k: u32,
+    pub l: u32,
+    pub m: u32,
+    pub n: u32,
+    pub o: u32,
+    pub p: u32,
+    pub q: u32,
+}
+
+impl_ffi_struct!(
+    U32x17,
+    Type::U32,
+    Type::U32,
+    Type::U32,
+    Type::U32,
+    Type::U32,
+    Type::U32,
+    Type::U32,
+    Type::U32,
+    Type::U32,
+    Type::U32,
+    Type::U32,
+    Type::U32,
+    Type::U32,
+    Type::U32,
+    Type::U32,
+    Type::U32,
+    Type::U32
+);
+
+pub static U32X17_ARG: U32x17 = U32x17 {
+    a: 0x3100_0001,
+    b: 0x3100_0002,
+    c: 0x3100_0003,
+    d: 0x3100_0004,
+    e: 0x3100_0005,
+    f: 0x3100_0006,
+    g: 0x3100_0007,
+    h: 0x3100_0008,
+    i: 0x3100_0009,
+    j: 0x3100_000a,
+    k: 0x3100_000b,
+    l: 0x3100_000c,
+    m: 0x3100_000d,
+    n: 0x3100_000e,
+    o: 0x3100_000f,
+    p: 0x3100_0010,
+    q: 0x3100_0011,
 };
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]

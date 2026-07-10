@@ -197,11 +197,7 @@ pub struct FfiTypeLayout {
 /// Calculate the padding needed to `size` to align with `align`.
 fn padding_needed(size: usize, align: usize) -> usize {
     let remainder = size % align;
-    if remainder == 0 {
-        0
-    } else {
-        align - remainder
-    }
+    if remainder == 0 { 0 } else { align - remainder }
 }
 
 impl Type {
@@ -763,7 +759,8 @@ mod tests {
             U8U128U8, NestedU8U32x2, NestedF32x2x2, NestedF64x2x2, NestedU8U64x2,
             NestedUnionU32F32, NestedUnionU32F32x2, NestedU8UnionU64F64, NestedUnionU8U128U8,
             NestedU8UnionU128U8, UsizePointer, UnionI32U32, UnionI64U64, UnionU128, UnionU8U128,
-            UnionU128U8, UnionU32F32, UnionU64F64, UnionNestedU8x3U64, UnionNestedU64x2,
+            UnionU128U8, UnionU32F32, UnionU64F64, UnionNestedU8x3U64,
+            UnionNestedU8x3F32x2, UnionNestedU16x3F64x2, UnionNestedU64x2,
             UnionNestedF64x2, UnionNestedU8U16U64, UnionNestedU64F64, UnionNestedF32x4U32x4,
             UnionNestedF64x2U64x2, UnionNestedF32x2U64, UnionNestedF64x4U64x4,
             UnionNestedU64x4F64x4,

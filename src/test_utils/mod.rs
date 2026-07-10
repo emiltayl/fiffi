@@ -1,7 +1,28 @@
 pub mod structs;
 pub mod unions;
 
-use core::ffi::{CStr, c_char};
+use core::ffi::{CStr, c_char, c_void};
+
+use crate::types::{FfiType, Type};
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct Ptr(*const c_void);
+
+// SAFETY: This struct is only intended for passing a pointers that will not be read or written
+// to across FFI boundaries.
+unsafe impl Send for Ptr {}
+
+// SAFETY: This struct is only intended for passing a pointers that will not be read or written
+// to across FFI boundaries.
+unsafe impl Sync for Ptr {}
+
+// SAFETY: `Ptr` is `repr(transparent)` with a single pointer field.
+unsafe impl FfiType for Ptr {
+    fn ffi_type() -> Type {
+        Type::Pointer
+    }
+}
 
 pub static I8_ARG: i8 = 0x11;
 pub static U8_ARG: u8 = 0x22;
@@ -23,6 +44,7 @@ pub static ISIZE_ARG: isize = I64_ARG as isize;
     reason = "Truncating is not a problem in this instance as we are comparing the argument with `USIZE_ARG` anyways."
 )]
 pub static USIZE_ARG: usize = U64_ARG as usize;
+pub static PTR_ARG: Ptr = Ptr((&raw const U8_ARG).cast());
 pub static F32_ARG: f32 = core::f32::consts::PI;
 pub static F64_ARG: f64 = core::f64::consts::E;
 
