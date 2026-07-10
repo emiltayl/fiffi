@@ -28,6 +28,7 @@ ABIs on common platforms, and then branch out from there as needed.
 
 # Work log
 
-* 2026-07-10 Added function call test suite added with 308 failing tests.
+* 2026-07-10 Added function call test suite added with 308 failing tests. Got started preparing for
+  code for x86_64 SysV calls.
 * 2026-07-06 Added union support to `Type` and implemented layout and offset calculation for `Type`.
 * 2026-07-04 Started this document

@@ -36,9 +36,8 @@ use core::ptr::{self, null_mut};
 
 #[cfg(msan)]
 use crate::__msan_unpoison;
-use crate::FnPtr;
-use crate::abi::Abi;
 use crate::types::{FfiTypeLayout, Type, VariadicType};
+use crate::{Abi, FnPtr};
 
 /// Reference to an argument to pass to [`Function::call`].
 ///

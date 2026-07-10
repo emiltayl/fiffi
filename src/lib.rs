@@ -158,7 +158,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(not(test), no_std)]
 
-pub mod abi;
+pub(crate) mod backend;
 // TODO enable closures when calls are up and running
 #[cfg(all(feature = "closure", false))]
 pub mod closure;
@@ -167,6 +167,8 @@ pub mod function;
 pub mod types;
 
 mod fn_ptr;
+
+pub use backend::Abi;
 pub use fn_ptr::FnPtr;
 
 #[cfg(msan)]

@@ -24,34 +24,34 @@ macro_rules! function_tests_for_abi {
             use crate::function::tests::unwind::unwind_tests_for_abi;
 
             call_shape_tests_for_abi! {
-                abi: crate::abi::Abi::$abi_variant,
+                abi: crate::Abi::$abi_variant,
                 extern_abi: $extern_abi,
             }
 
             edge_value_tests_for_abi! {
-                abi: crate::abi::Abi::$abi_variant,
+                abi: crate::Abi::$abi_variant,
                 extern_abi: $extern_abi,
             }
 
             single_value_tests_for_abi! {
-                abi: crate::abi::Abi::$abi_variant,
+                abi: crate::Abi::$abi_variant,
                 extern_abi: $extern_abi,
             }
 
             pass_by_value_tests_for_abi! {
-                abi: crate::abi::Abi::$abi_variant,
+                abi: crate::Abi::$abi_variant,
                 extern_abi: $extern_abi,
             }
 
             register_passing_tests_for_abi! {
-                abi: crate::abi::Abi::$abi_variant,
+                abi: crate::Abi::$abi_variant,
                 extern_abi: $extern_abi,
                 gpr_regs: [$($gpr_reg),*],
                 float_regs: [$($float_reg),*]
             }
 
             unwind_tests_for_abi! {
-                abi: crate::abi::Abi::$abi_variant,
+                abi: crate::Abi::$abi_variant,
                 extern_abi: $extern_abi,
             }
 
@@ -60,7 +60,7 @@ macro_rules! function_tests_for_abi {
                 extern $extern_abi fn test_callback() {}
 
                 crate::function::tests::helpers::call_ffi_fn!(
-                    abi: crate::abi::Abi::$abi_variant,
+                    abi: crate::Abi::$abi_variant,
                     test_callback()
                 );
             }
