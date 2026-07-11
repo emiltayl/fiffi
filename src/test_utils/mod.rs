@@ -28,12 +28,12 @@ pub static I8_ARG: i8 = 0x11;
 pub static U8_ARG: u8 = 0x22;
 pub static I16_ARG: i16 = 0x3333;
 pub static U16_ARG: u16 = 0x4444;
-pub static I32_ARG: i32 = 0x5555_5555;
-pub static U32_ARG: u32 = 0x6666_6666;
-pub static I64_ARG: i64 = 0x7777_7777_7777_7777;
-pub static U64_ARG: u64 = 0x8888_8888_8888_8888;
-pub static I128_ARG: i128 = 0x7777_7777_7777_7777_7777_7777_7777_7777;
-pub static U128_ARG: u128 = 0xaaaa_aaaa_aaaa_aaaa_aaaa_aaaa_aaaa_aaaa;
+pub static I32_ARG: i32 = 0x5555_6666;
+pub static U32_ARG: u32 = 0x6666_7777;
+pub static I64_ARG: i64 = 0x7777_8888_9999_aaaa;
+pub static U64_ARG: u64 = 0xbbbb_cccc_dddd_eeee;
+pub static I128_ARG: i128 = 0x7777_6666_5555_4444_3333_2222_1111_ffff;
+pub static U128_ARG: u128 = 0xaaaa_bbbb_cccc_dddd_eeee_ffff_0000_1111;
 #[expect(
     clippy::cast_possible_truncation,
     reason = "Truncating is not a problem in this instance as we are comparing the argument with `ISIZE_ARG` anyways."
