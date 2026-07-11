@@ -55,7 +55,7 @@ pub(crate) mod internal {
             unsafe { Self::new_unchecked(types.to_vec()) }
         }
 
-        pub fn as_vec(&self) -> &Vec<Type> {
+        pub fn as_slice(&self) -> &[Type] {
             &self.0
         }
     }
@@ -351,7 +351,7 @@ impl Type {
             Type::Struct(type_vec) => {
                 let mut layout = FfiTypeLayout { align: 1, size: 0 };
 
-                for field in type_vec.as_vec() {
+                for field in type_vec.as_slice() {
                     let field_layout = field.layout();
 
                     layout.size += padding_needed(layout.size, field_layout.align);
@@ -366,7 +366,7 @@ impl Type {
             Type::Union(type_vec) => {
                 let mut layout = FfiTypeLayout { align: 1, size: 0 };
 
-                for field in type_vec.as_vec() {
+                for field in type_vec.as_slice() {
                     let field_layout = field.layout();
 
                     layout.align = layout.align.max(field_layout.align);
@@ -384,10 +384,10 @@ impl Type {
         // TODO benchmark whether it is worth it to combine `Type::layout` and `Type::field_offsets`
         // for structs to avoid iterating over fields twice.
         if let Type::Struct(type_vec) = self {
-            let mut offsets = Vec::with_capacity(type_vec.as_vec().len());
+            let mut offsets = Vec::with_capacity(type_vec.as_slice().len());
             let mut offset = 0;
 
-            for field in type_vec.as_vec() {
+            for field in type_vec.as_slice() {
                 let field_layout = field.layout();
                 offset += padding_needed(offset, field_layout.align);
                 offsets.push(offset);
