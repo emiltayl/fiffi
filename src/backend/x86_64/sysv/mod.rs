@@ -7,8 +7,92 @@ use alloc::vec::Vec;
 
 use crate::types::{FfiTypeLayout, Type};
 
-const INTEGER_ARG_REGISTER_COUNT: u8 = 6;
-const SSE_ARG_REGISTER_COUNT: u8 = 8;
+const GPR_ARGUMENT_REGISTER_COUNT: usize = 6;
+const XMM_ARGUMENT_REGISTER_COUNT: usize = 8;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RegisterBank {
+    Gpr,
+    Xmm,
+}
+
+impl RegisterBank {
+    fn gpr_count(&self) -> usize {
+        usize::from(*self == RegisterBank::Gpr)
+    }
+
+    fn xmm_count(&self) -> usize {
+        usize::from(*self == RegisterBank::Xmm)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RegisterRequirements {
+    One(RegisterBank),
+    Two(RegisterBank, RegisterBank),
+}
+
+impl RegisterRequirements {
+    fn counts(&self) -> (usize, usize) {
+        match self {
+            RegisterRequirements::One(bank) => (bank.gpr_count(), bank.xmm_count()),
+            RegisterRequirements::Two(bank_a, bank_b) => (
+                bank_a.gpr_count() + bank_b.gpr_count(),
+                bank_a.xmm_count() + bank_b.xmm_count(),
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RegisterAllocation {
+    One(ArgumentDestination),
+    Two(ArgumentDestination, ArgumentDestination),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RegisterAllocator {
+    next_gpr_index: usize,
+    next_xmm_index: usize,
+}
+
+impl RegisterAllocator {
+    fn allocate(&mut self, requirements: RegisterRequirements) -> Option<RegisterAllocation> {
+        if !self.space_available_for(requirements) {
+            return None;
+        }
+
+        Some(match requirements {
+            RegisterRequirements::One(bank) => RegisterAllocation::One(self.take(bank)),
+            RegisterRequirements::Two(first_bank, second_bank) => {
+                RegisterAllocation::Two(self.take(first_bank), self.take(second_bank))
+            }
+        })
+    }
+
+    fn space_available_for(&self, requirements: RegisterRequirements) -> bool {
+        let (gpr_required, xmm_required) = requirements.counts();
+
+        (self.next_gpr_index + gpr_required) <= GPR_ARGUMENT_REGISTER_COUNT
+            && (self.next_xmm_index + xmm_required) <= XMM_ARGUMENT_REGISTER_COUNT
+    }
+
+    fn take(&mut self, bank: RegisterBank) -> ArgumentDestination {
+        match bank {
+            RegisterBank::Gpr => {
+                let index = self.next_gpr_index;
+                self.next_gpr_index += 1;
+                ArgumentDestination::Gpr(index)
+            }
+
+            RegisterBank::Xmm => {
+                let index = self.next_xmm_index;
+                self.next_xmm_index += 1;
+                ArgumentDestination::Xmm(index)
+            }
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct MarshalPlan {
@@ -22,8 +106,7 @@ pub(super) struct MarshalPlan {
 
 impl MarshalPlan {
     pub(super) fn build(argument_types: &[Type], return_type: Option<&Type>) -> Self {
-        let mut integer_registers_left: u8 = INTEGER_ARG_REGISTER_COUNT;
-        let mut sse_registers_left: u8 = SSE_ARG_REGISTER_COUNT;
+        let mut register_allocator = RegisterAllocator::default();
 
         let mut argument_moves: Vec<ArgumentMove> = Vec::with_capacity(argument_types.len());
 
@@ -35,148 +118,37 @@ impl MarshalPlan {
         for (argument_index, argument) in argument_types.iter().enumerate() {
             let argument_layout = argument.layout();
 
-            match ArgumentClass::classify(argument) {
-                ArgumentClass::Sse => {
-                    if sse_registers_left > 0 {
-                        argument_moves.push(ArgumentMove {
-                            argument_index,
-                            source_offset: 0,
-                            size: argument_layout.size,
-                            destination: ArgumentDestination::Xmm(usize::from(
-                                SSE_ARG_REGISTER_COUNT - sse_registers_left,
-                            )),
-                        });
+            let argument_class = ArgumentClass::classify(argument);
 
-                        sse_registers_left -= 1;
-                    } else {
-                        stack_arguments.push((argument_index, argument_layout));
-                    }
+            let allocation = argument_class
+                .register_requirements()
+                .and_then(|requirements| register_allocator.allocate(requirements));
+
+            match allocation {
+                None => stack_arguments.push((argument_index, argument_layout)),
+                Some(RegisterAllocation::One(destination)) => {
+                    argument_moves.push(ArgumentMove {
+                        argument_index,
+                        source_offset: 0,
+                        size: argument_layout.size,
+                        destination,
+                    });
                 }
+                Some(RegisterAllocation::Two(first_destination, second_destination)) => {
+                    argument_moves.push(ArgumentMove {
+                        argument_index,
+                        source_offset: 0,
+                        size: 8,
+                        destination: first_destination,
+                    });
 
-                ArgumentClass::SseSse => {
-                    if sse_registers_left > 1 {
-                        argument_moves.push(ArgumentMove {
-                            argument_index,
-                            source_offset: 0,
-                            size: 8,
-                            destination: ArgumentDestination::Xmm(usize::from(
-                                SSE_ARG_REGISTER_COUNT - sse_registers_left,
-                            )),
-                        });
-
-                        argument_moves.push(ArgumentMove {
-                            argument_index,
-                            source_offset: 8,
-                            size: argument_layout.size - 8,
-                            destination: ArgumentDestination::Xmm(usize::from(
-                                SSE_ARG_REGISTER_COUNT - sse_registers_left + 1,
-                            )),
-                        });
-
-                        sse_registers_left -= 2;
-                    } else {
-                        stack_arguments.push((argument_index, argument_layout));
-                    }
+                    argument_moves.push(ArgumentMove {
+                        argument_index,
+                        source_offset: 8,
+                        size: argument_layout.size - 8,
+                        destination: second_destination,
+                    });
                 }
-
-                ArgumentClass::SseInteger => {
-                    if sse_registers_left > 0 && integer_registers_left > 0 {
-                        argument_moves.push(ArgumentMove {
-                            argument_index,
-                            source_offset: 0,
-                            size: 8,
-                            destination: ArgumentDestination::Xmm(usize::from(
-                                SSE_ARG_REGISTER_COUNT - sse_registers_left,
-                            )),
-                        });
-
-                        argument_moves.push(ArgumentMove {
-                            argument_index,
-                            source_offset: 8,
-                            size: argument_layout.size - 8,
-                            destination: ArgumentDestination::Gpr(usize::from(
-                                INTEGER_ARG_REGISTER_COUNT - integer_registers_left,
-                            )),
-                        });
-
-                        sse_registers_left -= 1;
-                        integer_registers_left -= 1;
-                    } else {
-                        stack_arguments.push((argument_index, argument_layout));
-                    }
-                }
-
-                ArgumentClass::Integer => {
-                    if integer_registers_left > 0 {
-                        argument_moves.push(ArgumentMove {
-                            argument_index,
-                            source_offset: 0,
-                            size: argument_layout.size,
-                            destination: ArgumentDestination::Gpr(usize::from(
-                                INTEGER_ARG_REGISTER_COUNT - integer_registers_left,
-                            )),
-                        });
-
-                        integer_registers_left -= 1;
-                    } else {
-                        stack_arguments.push((argument_index, argument_layout));
-                    }
-                }
-
-                ArgumentClass::IntegerInteger => {
-                    if integer_registers_left > 1 {
-                        argument_moves.push(ArgumentMove {
-                            argument_index,
-                            source_offset: 0,
-                            size: 8,
-                            destination: ArgumentDestination::Gpr(usize::from(
-                                INTEGER_ARG_REGISTER_COUNT - integer_registers_left,
-                            )),
-                        });
-
-                        argument_moves.push(ArgumentMove {
-                            argument_index,
-                            source_offset: 8,
-                            size: argument_layout.size - 8,
-                            destination: ArgumentDestination::Gpr(usize::from(
-                                INTEGER_ARG_REGISTER_COUNT - integer_registers_left + 1,
-                            )),
-                        });
-
-                        integer_registers_left -= 2;
-                    } else {
-                        stack_arguments.push((argument_index, argument_layout));
-                    }
-                }
-
-                ArgumentClass::IntegerSse => {
-                    if sse_registers_left > 0 && integer_registers_left > 0 {
-                        argument_moves.push(ArgumentMove {
-                            argument_index,
-                            source_offset: 0,
-                            size: 8,
-                            destination: ArgumentDestination::Gpr(usize::from(
-                                INTEGER_ARG_REGISTER_COUNT - integer_registers_left,
-                            )),
-                        });
-
-                        argument_moves.push(ArgumentMove {
-                            argument_index,
-                            source_offset: 8,
-                            size: argument_layout.size - 8,
-                            destination: ArgumentDestination::Xmm(usize::from(
-                                SSE_ARG_REGISTER_COUNT - sse_registers_left,
-                            )),
-                        });
-
-                        sse_registers_left -= 1;
-                        integer_registers_left -= 1;
-                    } else {
-                        stack_arguments.push((argument_index, argument_layout));
-                    }
-                }
-
-                ArgumentClass::Memory => stack_arguments.push((argument_index, argument_layout)),
             }
         }
 
@@ -246,12 +218,12 @@ struct ArgumentMove {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ArgumentClass {
-    Sse,
-    SseSse,
-    SseInteger,
     Integer,
     IntegerInteger,
     IntegerSse,
+    Sse,
+    SseSse,
+    SseInteger,
     Memory,
 }
 
@@ -377,6 +349,21 @@ impl ArgumentClass {
             [EightbyteClass::NoClass, _] => unreachable!(),
         }
     }
+
+    fn register_requirements(self) -> Option<RegisterRequirements> {
+        use RegisterBank::{Gpr, Xmm};
+        use RegisterRequirements::{One, Two};
+
+        match self {
+            Self::Integer => Some(One(Gpr)),
+            Self::IntegerInteger => Some(Two(Gpr, Gpr)),
+            Self::IntegerSse => Some(Two(Gpr, Xmm)),
+            Self::Sse => Some(One(Xmm)),
+            Self::SseSse => Some(Two(Xmm, Xmm)),
+            Self::SseInteger => Some(Two(Xmm, Gpr)),
+            Self::Memory => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -400,7 +387,7 @@ impl EightbyteClass {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArgumentClass, EightbyteClass};
+    use super::*;
     use crate::test_utils::structs::{
         F32x2, F32x3U32, F64U64, F64x2, NestedF32x2x2, NestedF64x2x2, NestedU8U32x2, NestedU8U64x2,
         NestedU8UnionU64F64, NestedU8UnionU128U8, NestedUnionU8U128U8, NestedUnionU32F32,
@@ -412,7 +399,7 @@ mod tests {
         UnionNestedU64x2, UnionNestedU64x4F64x4, UnionU8U128, UnionU32F32, UnionU64F64, UnionU128,
         UnionU128U8,
     };
-    use crate::types::{FfiType, Type};
+    use crate::types::FfiType;
 
     fn assert_ffi_class<T: FfiType>(expected: ArgumentClass) {
         assert_eq!(ArgumentClass::classify(&T::ffi_type()), expected);

@@ -19,6 +19,10 @@ ABIs on common platforms, and then branch out from there as needed.
 * [ ] Support discarding return value, add tests for this
 * [ ] Take args by reference in `Function::call`
 * [ ] Review test suite for missing test cases
+* [ ] Plan how to handle overflow in size calculations, document it explicitly
+  * [ ] Types
+  * [ ] Marshalling plan (stack buffer)
+  * [ ] Anything else?
 * [ ] 64-bit x86 Win64 ABI for function calls
 * [ ] 32-bit x86 ABIs for function calls
 * [ ] Aarch64 ABIs for function calls
