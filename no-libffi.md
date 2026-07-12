@@ -13,7 +13,7 @@ ABIs on common platforms, and then branch out from there as needed.
 * [x] `Type` size and layout functionality
 * [x] Initial test suite for function calls
 * [ ] 64-bit x86 SysV ABI for function calls
-  * [ ] Argument, return value classification
+  * [x] Argument, return value classification
   * [ ] Plan for marshalling arguments
   * [ ] Assembly: argument marshalling, the call and return value handling
 * [ ] Support discarding return value, add tests for this
@@ -28,6 +28,7 @@ ABIs on common platforms, and then branch out from there as needed.
 
 # Work log
 
+* 2026-07-12 Got started with argument marshalling plan generation.
 * 2026-07-10 Added function call test suite added with 308 failing tests. Got started preparing for
   code for x86_64 SysV calls.
 * 2026-07-06 Added union support to `Type` and implemented layout and offset calculation for `Type`.

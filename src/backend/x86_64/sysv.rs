@@ -1,35 +1,265 @@
+//! TODO Top-level documentation with information about how ABI works and assumptions (such as stack
+//! should start aligned to 16 bytes).
+
 extern crate alloc;
 
 use alloc::vec::Vec;
 
-use crate::types::Type;
+use crate::types::{FfiTypeLayout, Type};
 
-#[derive(Clone, Debug)]
-pub(super) struct MarshalPlan {}
+const INTEGER_ARG_REGISTER_COUNT: u8 = 6;
+const SSE_ARG_REGISTER_COUNT: u8 = 8;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ArgumentClass {
-    Fpr,
-    FprFpr,
-    FprGpr,
-    Gpr,
-    GprGpr,
-    GprFpr,
-    Memory,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct MarshalPlan {
+    /// Where to put arguments to prepare for a function call.
+    argument_moves: Vec<ArgumentMove>,
+
+    /// The size of the buffer containing arguments passed on the stack.
+    stack_buffer_size: usize,
+    // TODO Handle return values as well
+}
+
+impl MarshalPlan {
+    pub(super) fn build(argument_types: &[Type], return_type: Option<&Type>) -> Self {
+        let mut integer_registers_left: u8 = INTEGER_ARG_REGISTER_COUNT;
+        let mut sse_registers_left: u8 = SSE_ARG_REGISTER_COUNT;
+
+        let mut argument_moves: Vec<ArgumentMove> = Vec::with_capacity(argument_types.len());
+
+        let mut stack_buffer_size: usize = 0;
+        let mut stack_arguments: Vec<(usize, FfiTypeLayout)> = Vec::new();
+
+        // TODO handle `ret` first. May use register slots for return pointer?
+
+        for (argument_index, argument) in argument_types.iter().enumerate() {
+            let argument_layout = argument.layout();
+
+            match ArgumentClass::classify(argument) {
+                ArgumentClass::Sse => {
+                    if sse_registers_left > 0 {
+                        argument_moves.push(ArgumentMove {
+                            argument_index,
+                            source_offset: 0,
+                            size: argument_layout.size,
+                            destination: ArgumentDestination::Xmm(usize::from(
+                                SSE_ARG_REGISTER_COUNT - sse_registers_left,
+                            )),
+                        });
+
+                        sse_registers_left -= 1;
+                    } else {
+                        stack_arguments.push((argument_index, argument_layout));
+                    }
+                }
+
+                ArgumentClass::SseSse => {
+                    if sse_registers_left > 1 {
+                        argument_moves.push(ArgumentMove {
+                            argument_index,
+                            source_offset: 0,
+                            size: 8,
+                            destination: ArgumentDestination::Xmm(usize::from(
+                                SSE_ARG_REGISTER_COUNT - sse_registers_left,
+                            )),
+                        });
+
+                        argument_moves.push(ArgumentMove {
+                            argument_index,
+                            source_offset: 8,
+                            size: argument_layout.size - 8,
+                            destination: ArgumentDestination::Xmm(usize::from(
+                                SSE_ARG_REGISTER_COUNT - sse_registers_left + 1,
+                            )),
+                        });
+
+                        sse_registers_left -= 2;
+                    } else {
+                        stack_arguments.push((argument_index, argument_layout));
+                    }
+                }
+
+                ArgumentClass::SseInteger => {
+                    if sse_registers_left > 0 && integer_registers_left > 0 {
+                        argument_moves.push(ArgumentMove {
+                            argument_index,
+                            source_offset: 0,
+                            size: 8,
+                            destination: ArgumentDestination::Xmm(usize::from(
+                                SSE_ARG_REGISTER_COUNT - sse_registers_left,
+                            )),
+                        });
+
+                        argument_moves.push(ArgumentMove {
+                            argument_index,
+                            source_offset: 8,
+                            size: argument_layout.size - 8,
+                            destination: ArgumentDestination::Gpr(usize::from(
+                                INTEGER_ARG_REGISTER_COUNT - integer_registers_left,
+                            )),
+                        });
+
+                        sse_registers_left -= 1;
+                        integer_registers_left -= 1;
+                    } else {
+                        stack_arguments.push((argument_index, argument_layout));
+                    }
+                }
+
+                ArgumentClass::Integer => {
+                    if integer_registers_left > 0 {
+                        argument_moves.push(ArgumentMove {
+                            argument_index,
+                            source_offset: 0,
+                            size: argument_layout.size,
+                            destination: ArgumentDestination::Gpr(usize::from(
+                                INTEGER_ARG_REGISTER_COUNT - integer_registers_left,
+                            )),
+                        });
+
+                        integer_registers_left -= 1;
+                    } else {
+                        stack_arguments.push((argument_index, argument_layout));
+                    }
+                }
+
+                ArgumentClass::IntegerInteger => {
+                    if integer_registers_left > 1 {
+                        argument_moves.push(ArgumentMove {
+                            argument_index,
+                            source_offset: 0,
+                            size: 8,
+                            destination: ArgumentDestination::Gpr(usize::from(
+                                INTEGER_ARG_REGISTER_COUNT - integer_registers_left,
+                            )),
+                        });
+
+                        argument_moves.push(ArgumentMove {
+                            argument_index,
+                            source_offset: 8,
+                            size: argument_layout.size - 8,
+                            destination: ArgumentDestination::Gpr(usize::from(
+                                INTEGER_ARG_REGISTER_COUNT - integer_registers_left + 1,
+                            )),
+                        });
+
+                        integer_registers_left -= 2;
+                    } else {
+                        stack_arguments.push((argument_index, argument_layout));
+                    }
+                }
+
+                ArgumentClass::IntegerSse => {
+                    if sse_registers_left > 0 && integer_registers_left > 0 {
+                        argument_moves.push(ArgumentMove {
+                            argument_index,
+                            source_offset: 0,
+                            size: 8,
+                            destination: ArgumentDestination::Gpr(usize::from(
+                                INTEGER_ARG_REGISTER_COUNT - integer_registers_left,
+                            )),
+                        });
+
+                        argument_moves.push(ArgumentMove {
+                            argument_index,
+                            source_offset: 8,
+                            size: argument_layout.size - 8,
+                            destination: ArgumentDestination::Xmm(usize::from(
+                                SSE_ARG_REGISTER_COUNT - sse_registers_left,
+                            )),
+                        });
+
+                        sse_registers_left -= 1;
+                        integer_registers_left -= 1;
+                    } else {
+                        stack_arguments.push((argument_index, argument_layout));
+                    }
+                }
+
+                ArgumentClass::Memory => stack_arguments.push((argument_index, argument_layout)),
+            }
+        }
+
+        // Arguments are pushed to the stack right to left, which leaves the first argument on the
+        // stack at the lowest address as the stack grows "down" towards lower addresses. Fiffi will
+        // ensure that the first argument on the stack will be aligned to 16 bytes.
+        for (argument_index, argument_layout) in stack_arguments {
+            stack_buffer_size = stack_buffer_size.next_multiple_of(argument_layout.align);
+
+            argument_moves.push(ArgumentMove {
+                argument_index,
+                source_offset: 0,
+                size: argument_layout.size,
+                destination: ArgumentDestination::Stack(stack_buffer_size),
+            });
+
+            stack_buffer_size = (stack_buffer_size + argument_layout.size).next_multiple_of(8);
+        }
+
+        MarshalPlan {
+            argument_moves,
+            stack_buffer_size,
+        }
+    }
+}
+
+/// Where an argument should be placed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ArgumentDestination {
+    /// Place argument in a general purpose register.
+    ///
+    /// The `usize` is the index in the integer register array.
+    Gpr(usize),
+
+    /// Place argument in a XMM register.
+    ///
+    /// The `usize` is the index in the XMM register array.
+    Xmm(usize),
+
+    /// Place the argument on the stack.
+    ///
+    /// The `usize` is the offset from the start of the buffer that will be put on the stack before
+    /// the call.
+    Stack(usize),
+}
+
+/// Instructions for Rust for how to prepare arguments for function calls.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ArgumentMove {
+    /// The index of the argument to move.
+    argument_index: usize,
+
+    /// The offset from the source pointer to start moving data from.
+    ///
+    /// # TODO
+    ///
+    /// This could potentially be something smaller than an usize? Would it shrink this struct
+    /// though?
+    source_offset: usize,
+
+    /// The number of bytes to move to `destination`.
+    size: usize,
+
+    /// Where the argument should be moved to.
+    destination: ArgumentDestination,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EightbyteClass {
-    Integer,
+enum ArgumentClass {
     Sse,
-    NoClass,
+    SseSse,
+    SseInteger,
+    Integer,
+    IntegerInteger,
+    IntegerSse,
+    Memory,
 }
 
 impl ArgumentClass {
     fn classify(ty: &Type) -> Self {
         match ty {
-            Type::I128 | Type::U128 => Self::GprGpr,
-            Type::F32 | Type::F64 => Self::Fpr,
+            Type::I128 | Type::U128 => Self::IntegerInteger,
+            Type::F32 | Type::F64 => Self::Sse,
             Type::I8
             | Type::U8
             | Type::I16
@@ -40,7 +270,7 @@ impl ArgumentClass {
             | Type::U64
             | Type::Isize
             | Type::Usize
-            | Type::Pointer => Self::Gpr,
+            | Type::Pointer => Self::Integer,
 
             Type::Struct(fields) => {
                 let layout = ty.layout();
@@ -134,12 +364,12 @@ impl ArgumentClass {
 
     fn from_eightbyte_classes(eightbyte_classes: [EightbyteClass; 2]) -> Self {
         match eightbyte_classes {
-            [EightbyteClass::Sse, EightbyteClass::Sse] => Self::FprFpr,
-            [EightbyteClass::Sse, EightbyteClass::Integer] => Self::FprGpr,
-            [EightbyteClass::Sse, EightbyteClass::NoClass] => Self::Fpr,
-            [EightbyteClass::Integer, EightbyteClass::Sse] => Self::GprFpr,
-            [EightbyteClass::Integer, EightbyteClass::Integer] => Self::GprGpr,
-            [EightbyteClass::Integer, EightbyteClass::NoClass] => Self::Gpr,
+            [EightbyteClass::Sse, EightbyteClass::Sse] => Self::SseSse,
+            [EightbyteClass::Sse, EightbyteClass::Integer] => Self::SseInteger,
+            [EightbyteClass::Sse, EightbyteClass::NoClass] => Self::Sse,
+            [EightbyteClass::Integer, EightbyteClass::Sse] => Self::IntegerSse,
+            [EightbyteClass::Integer, EightbyteClass::Integer] => Self::IntegerInteger,
+            [EightbyteClass::Integer, EightbyteClass::NoClass] => Self::Integer,
             // For `EightbyteClass` arrays that are fully initialized, it should not be possible to
             // end up in a situation where the first element is `NoClass` without `unsafe` code.
             // Both structs and unions will have at least one field or variant at offset `0` whose
@@ -147,6 +377,13 @@ impl ArgumentClass {
             [EightbyteClass::NoClass, _] => unreachable!(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EightbyteClass {
+    Integer,
+    Sse,
+    NoClass,
 }
 
 impl EightbyteClass {
@@ -184,21 +421,21 @@ mod tests {
     #[test]
     fn scalar_classification() {
         let cases = [
-            (Type::I8, ArgumentClass::Gpr),
-            (Type::U8, ArgumentClass::Gpr),
-            (Type::I16, ArgumentClass::Gpr),
-            (Type::U16, ArgumentClass::Gpr),
-            (Type::I32, ArgumentClass::Gpr),
-            (Type::U32, ArgumentClass::Gpr),
-            (Type::I64, ArgumentClass::Gpr),
-            (Type::U64, ArgumentClass::Gpr),
-            (Type::Isize, ArgumentClass::Gpr),
-            (Type::Usize, ArgumentClass::Gpr),
-            (Type::Pointer, ArgumentClass::Gpr),
-            (Type::F32, ArgumentClass::Fpr),
-            (Type::F64, ArgumentClass::Fpr),
-            (Type::I128, ArgumentClass::GprGpr),
-            (Type::U128, ArgumentClass::GprGpr),
+            (Type::I8, ArgumentClass::Integer),
+            (Type::U8, ArgumentClass::Integer),
+            (Type::I16, ArgumentClass::Integer),
+            (Type::U16, ArgumentClass::Integer),
+            (Type::I32, ArgumentClass::Integer),
+            (Type::U32, ArgumentClass::Integer),
+            (Type::I64, ArgumentClass::Integer),
+            (Type::U64, ArgumentClass::Integer),
+            (Type::Isize, ArgumentClass::Integer),
+            (Type::Usize, ArgumentClass::Integer),
+            (Type::Pointer, ArgumentClass::Integer),
+            (Type::F32, ArgumentClass::Sse),
+            (Type::F64, ArgumentClass::Sse),
+            (Type::I128, ArgumentClass::IntegerInteger),
+            (Type::U128, ArgumentClass::IntegerInteger),
         ];
 
         for (ty, expected) in cases {
@@ -208,46 +445,46 @@ mod tests {
 
     #[test]
     fn struct_classification() {
-        assert_ffi_class::<F32x2>(ArgumentClass::Fpr);
-        assert_ffi_class::<U32F32>(ArgumentClass::Gpr);
-        assert_ffi_class::<F64x2>(ArgumentClass::FprFpr);
-        assert_ffi_class::<F64U64>(ArgumentClass::FprGpr);
-        assert_ffi_class::<U64F64>(ArgumentClass::GprFpr);
-        assert_ffi_class::<U64x2>(ArgumentClass::GprGpr);
-        assert_ffi_class::<F32x3U32>(ArgumentClass::FprGpr);
-        assert_ffi_class::<U32F32x3>(ArgumentClass::GprFpr);
+        assert_ffi_class::<F32x2>(ArgumentClass::Sse);
+        assert_ffi_class::<U32F32>(ArgumentClass::Integer);
+        assert_ffi_class::<F64x2>(ArgumentClass::SseSse);
+        assert_ffi_class::<F64U64>(ArgumentClass::SseInteger);
+        assert_ffi_class::<U64F64>(ArgumentClass::IntegerSse);
+        assert_ffi_class::<U64x2>(ArgumentClass::IntegerInteger);
+        assert_ffi_class::<F32x3U32>(ArgumentClass::SseInteger);
+        assert_ffi_class::<U32F32x3>(ArgumentClass::IntegerSse);
         assert_ffi_class::<U64x3>(ArgumentClass::Memory);
-        assert_ffi_class::<U128>(ArgumentClass::GprGpr);
+        assert_ffi_class::<U128>(ArgumentClass::IntegerInteger);
         assert_ffi_class::<U128x2>(ArgumentClass::Memory);
     }
 
     #[test]
     fn recursive_struct_classification() {
-        assert_ffi_class::<NestedF32x2x2>(ArgumentClass::FprFpr);
-        assert_ffi_class::<NestedU8U32x2>(ArgumentClass::GprGpr);
+        assert_ffi_class::<NestedF32x2x2>(ArgumentClass::SseSse);
+        assert_ffi_class::<NestedU8U32x2>(ArgumentClass::IntegerInteger);
         assert_ffi_class::<NestedU8U64x2>(ArgumentClass::Memory);
         assert_ffi_class::<NestedF64x2x2>(ArgumentClass::Memory);
     }
 
     #[test]
     fn basic_union_classification() {
-        assert_ffi_class::<UnionI32U32>(ArgumentClass::Gpr);
-        assert_ffi_class::<UnionU32F32>(ArgumentClass::Gpr);
-        assert_ffi_class::<UnionU64F64>(ArgumentClass::Gpr);
-        assert_ffi_class::<UnionU128>(ArgumentClass::GprGpr);
-        assert_ffi_class::<UnionU8U128>(ArgumentClass::GprGpr);
-        assert_ffi_class::<UnionU128U8>(ArgumentClass::GprGpr);
-        assert_ffi_class::<UnionNestedF64x2>(ArgumentClass::FprFpr);
-        assert_ffi_class::<UnionNestedU64x2>(ArgumentClass::GprGpr);
+        assert_ffi_class::<UnionI32U32>(ArgumentClass::Integer);
+        assert_ffi_class::<UnionU32F32>(ArgumentClass::Integer);
+        assert_ffi_class::<UnionU64F64>(ArgumentClass::Integer);
+        assert_ffi_class::<UnionU128>(ArgumentClass::IntegerInteger);
+        assert_ffi_class::<UnionU8U128>(ArgumentClass::IntegerInteger);
+        assert_ffi_class::<UnionU128U8>(ArgumentClass::IntegerInteger);
+        assert_ffi_class::<UnionNestedF64x2>(ArgumentClass::SseSse);
+        assert_ffi_class::<UnionNestedU64x2>(ArgumentClass::IntegerInteger);
     }
 
     #[test]
     fn mixed_aggregate_union_classification() {
-        assert_ffi_class::<UnionNestedU8x3F32x2>(ArgumentClass::Gpr);
-        assert_ffi_class::<UnionNestedF32x2U64>(ArgumentClass::Gpr);
-        assert_ffi_class::<UnionNestedU16x3F64x2>(ArgumentClass::GprFpr);
-        assert_ffi_class::<UnionNestedF32x4U32x4>(ArgumentClass::GprGpr);
-        assert_ffi_class::<UnionNestedF64x2U64x2>(ArgumentClass::GprGpr);
+        assert_ffi_class::<UnionNestedU8x3F32x2>(ArgumentClass::Integer);
+        assert_ffi_class::<UnionNestedF32x2U64>(ArgumentClass::Integer);
+        assert_ffi_class::<UnionNestedU16x3F64x2>(ArgumentClass::IntegerSse);
+        assert_ffi_class::<UnionNestedF32x4U32x4>(ArgumentClass::IntegerInteger);
+        assert_ffi_class::<UnionNestedF64x2U64x2>(ArgumentClass::IntegerInteger);
     }
 
     #[test]
@@ -258,9 +495,9 @@ mod tests {
 
     #[test]
     fn nested_union_struct_classification() {
-        assert_ffi_class::<NestedUnionU32F32>(ArgumentClass::Gpr);
-        assert_ffi_class::<NestedUnionU32F32x2>(ArgumentClass::Gpr);
-        assert_ffi_class::<NestedU8UnionU64F64>(ArgumentClass::GprGpr);
+        assert_ffi_class::<NestedUnionU32F32>(ArgumentClass::Integer);
+        assert_ffi_class::<NestedUnionU32F32x2>(ArgumentClass::Integer);
+        assert_ffi_class::<NestedU8UnionU64F64>(ArgumentClass::IntegerInteger);
         assert_ffi_class::<NestedUnionU8U128U8>(ArgumentClass::Memory);
         assert_ffi_class::<NestedU8UnionU128U8>(ArgumentClass::Memory);
     }
@@ -271,21 +508,21 @@ mod tests {
             Type::create_union_from_slice(&[Type::F32, Type::F64]).unwrap();
         assert_eq!(
             ArgumentClass::classify(&one_floating_eightbyte),
-            ArgumentClass::Fpr,
+            ArgumentClass::Sse,
         );
 
         let first_sse_second_integer =
             Type::create_union_from_slice(&[F64U64::ffi_type(), F64x2::ffi_type()]).unwrap();
         assert_eq!(
             ArgumentClass::classify(&first_sse_second_integer),
-            ArgumentClass::FprGpr,
+            ArgumentClass::SseInteger,
         );
 
         for variants in [[Type::F32, Type::U32], [Type::U32, Type::F32]] {
             let integer_dominates = Type::create_union_from_slice(&variants).unwrap();
             assert_eq!(
                 ArgumentClass::classify(&integer_dominates),
-                ArgumentClass::Gpr,
+                ArgumentClass::Integer,
             );
         }
 
@@ -294,7 +531,7 @@ mod tests {
             Type::create_struct_from_slice(&[Type::U64, floating_union]).unwrap();
         assert_eq!(
             ArgumentClass::classify(&union_at_nonzero_offset),
-            ArgumentClass::GprFpr,
+            ArgumentClass::IntegerSse,
         );
 
         let floating_union = Type::create_union_from_slice(&[Type::F64]).unwrap();
@@ -302,7 +539,7 @@ mod tests {
             Type::create_struct_from_slice(&[floating_union, Type::U64]).unwrap();
         assert_eq!(
             ArgumentClass::classify(&union_before_integer),
-            ArgumentClass::FprGpr,
+            ArgumentClass::SseInteger,
         );
     }
 
