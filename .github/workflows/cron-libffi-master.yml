@@ -25,7 +25,7 @@ jobs:
       - name: Prepare libffi master
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y autoconf automake libtool texinfo
+          sudo apt-get install --no-install-recommends -y autoconf automake libtool libltdl-dev texinfo
 
           libffi_rs_dir="$RUNNER_TEMP/libffi-rs"
           rm -rf "$libffi_rs_dir"
@@ -91,7 +91,7 @@ jobs:
       - name: Prepare libffi master
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y autoconf automake libtool texinfo clang-21
+          sudo apt-get install --no-install-recommends -y autoconf automake libtool libltdl-dev texinfo
 
           libffi_rs_dir="$RUNNER_TEMP/libffi-rs"
           rm -rf "$libffi_rs_dir"
@@ -113,7 +113,7 @@ jobs:
           SANITIZER_RUST_TEST_THREADS: ${{ matrix.sanitizer.rust_test_threads }}
           RUSTFLAGS: ${{ matrix.sanitizer.rustflags }}
           RUSTDOCFLAGS: ${{ matrix.sanitizer.rustdocflags }}
-          CC: clang-21
+          CC: clang-18
           CFLAGS: ${{ matrix.sanitizer.cflags }}
         run: |
           if [ -n "$SANITIZER_RUST_TEST_THREADS" ]; then
