@@ -202,6 +202,12 @@ Development currently occurs mainly on x86_64 Linux and Windows.
 * `x86_64-unknown-linux-gnu`
 * `x86_64-unknown-linux-musl`
 
+## `no_alloc` support?
+
+Fiffi does not currently support `no_alloc` and there is no concrete plans for implementing this. If
+you need to support `no_alloc` please open an issue with your use case, and if possible suggestions
+of how a `no_alloc` API could look.
+
 [`libffi`]: https://sourceware.org/libffi/
 [`libffi-rs`]: https://github.com/libffi-rs/libffi-rs/
 [`libffi-sys-rs`]: https://crates.io/crates/libffi-sys/
