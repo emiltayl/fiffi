@@ -26,25 +26,44 @@ impl Abi {
 
 #[derive(Clone, Debug)]
 pub(crate) struct CallInterface {
-    args: Vec<Type>,
-    return_type: Option<Type>,
-    marshal_plan: MarshalPlan,
+    marshal_plan: AbiPlan,
+}
+
+impl CallInterface {
+    pub(crate) fn new(argument_types: Vec<Type>, return_type: Option<Type>, abi: Abi) -> Self {
+        let marshal_plan = AbiPlan::new(&argument_types, return_type.as_ref(), abi);
+
+        CallInterface {
+            marshal_plan,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
-enum MarshalPlan {
-    SysVPlan(sysv::MarshalPlan),
+enum AbiPlan {
+    SysV(sysv::MarshalPlan),
 }
 
+impl AbiPlan {
+    pub(crate) fn new(argument_types: &[Type], return_type: Option<&Type>, abi: Abi) -> Self {
+        match abi {
+            Abi::SysV => Self::SysV(sysv::MarshalPlan::build(argument_types, return_type)),
+        }
+    }
+}
+
+#[derive(Debug)]
 #[repr(align(8))]
 struct Register(MaybeUninit<[u8; 8]>);
 
-#[repr(align(16))]
-struct FloatRegister(MaybeUninit<[u8; 8]>);
+// TODO default all 0
+impl Default for Register {
+    fn default() -> Self {
+        Self(MaybeUninit::new([0u8; 8]))
+    }
+}
 
 const _: () = {
     assert!(size_of::<usize>() == size_of::<Register>());
     assert!(align_of::<usize>() == align_of::<Register>());
-    assert!(size_of::<usize>() <= size_of::<FloatRegister>());
-    assert!(align_of::<usize>() <= align_of::<FloatRegister>());
 };

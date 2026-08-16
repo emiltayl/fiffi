@@ -36,6 +36,7 @@ use core::ptr::{self, null_mut};
 
 #[cfg(msan)]
 use crate::__msan_unpoison;
+use crate::backend::CallInterface;
 use crate::types::{FfiTypeLayout, Type, VariadicType};
 use crate::{Abi, FnPtr};
 
@@ -189,7 +190,7 @@ where
 /// ```
 #[derive(Clone, Debug)]
 pub struct Function {
-    // TODO cif: Cif,
+    call_interface: CallInterface,
     fn_ptr: FnPtr,
 }
 
@@ -296,15 +297,24 @@ impl Function {
     /// argument types are provided, only the first `c_uint::MAX` are retained in the prepared
     /// function signature.
     pub fn with_abi<'args, I>(
-        _fn_ptr: FnPtr,
-        _argument_types: I,
-        _return_type: Option<&Type>,
-        _abi: Abi,
+        fn_ptr: FnPtr,
+        argument_types: I,
+        return_type: Option<&Type>,
+        abi: Abi,
     ) -> Self
     where
         I: IntoIterator<Item = &'args Type>,
     {
-        todo!();
+        let call_interface = CallInterface::new(
+            argument_types.into_iter().cloned().collect(),
+            return_type.cloned(),
+            abi,
+        );
+
+        Self {
+            call_interface,
+            fn_ptr,
+        }
     }
 
     /// Creates a variadic `Function` using the provided [`Abi`].

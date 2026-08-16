@@ -1,7 +1,7 @@
 use crate::types::Type;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ArgumentClass {
+pub(super) enum ValueClass {
     Integer,
     IntegerInteger,
     IntegerSse,
@@ -11,7 +11,7 @@ pub(super) enum ArgumentClass {
     Memory,
 }
 
-impl ArgumentClass {
+impl ValueClass {
     pub(super) fn classify(ty: &Type) -> Self {
         match ty {
             Type::I128 | Type::U128 => Self::IntegerInteger,
@@ -170,92 +170,92 @@ mod tests {
     };
     use crate::types::FfiType;
 
-    fn assert_ffi_class<T: FfiType>(expected: ArgumentClass) {
-        assert_eq!(ArgumentClass::classify(&T::ffi_type()), expected);
+    fn assert_ffi_class<T: FfiType>(expected: ValueClass) {
+        assert_eq!(ValueClass::classify(&T::ffi_type()), expected);
     }
 
     #[test]
     fn scalar_classification() {
         let cases = [
-            (Type::I8, ArgumentClass::Integer),
-            (Type::U8, ArgumentClass::Integer),
-            (Type::I16, ArgumentClass::Integer),
-            (Type::U16, ArgumentClass::Integer),
-            (Type::I32, ArgumentClass::Integer),
-            (Type::U32, ArgumentClass::Integer),
-            (Type::I64, ArgumentClass::Integer),
-            (Type::U64, ArgumentClass::Integer),
-            (Type::Isize, ArgumentClass::Integer),
-            (Type::Usize, ArgumentClass::Integer),
-            (Type::Pointer, ArgumentClass::Integer),
-            (Type::F32, ArgumentClass::Sse),
-            (Type::F64, ArgumentClass::Sse),
-            (Type::I128, ArgumentClass::IntegerInteger),
-            (Type::U128, ArgumentClass::IntegerInteger),
+            (Type::I8, ValueClass::Integer),
+            (Type::U8, ValueClass::Integer),
+            (Type::I16, ValueClass::Integer),
+            (Type::U16, ValueClass::Integer),
+            (Type::I32, ValueClass::Integer),
+            (Type::U32, ValueClass::Integer),
+            (Type::I64, ValueClass::Integer),
+            (Type::U64, ValueClass::Integer),
+            (Type::Isize, ValueClass::Integer),
+            (Type::Usize, ValueClass::Integer),
+            (Type::Pointer, ValueClass::Integer),
+            (Type::F32, ValueClass::Sse),
+            (Type::F64, ValueClass::Sse),
+            (Type::I128, ValueClass::IntegerInteger),
+            (Type::U128, ValueClass::IntegerInteger),
         ];
 
         for (ty, expected) in cases {
-            assert_eq!(ArgumentClass::classify(&ty), expected);
+            assert_eq!(ValueClass::classify(&ty), expected);
         }
     }
 
     #[test]
     fn struct_classification() {
-        assert_ffi_class::<F32x2>(ArgumentClass::Sse);
-        assert_ffi_class::<U32F32>(ArgumentClass::Integer);
-        assert_ffi_class::<F64x2>(ArgumentClass::SseSse);
-        assert_ffi_class::<F64U64>(ArgumentClass::SseInteger);
-        assert_ffi_class::<U64F64>(ArgumentClass::IntegerSse);
-        assert_ffi_class::<U64x2>(ArgumentClass::IntegerInteger);
-        assert_ffi_class::<F32x3U32>(ArgumentClass::SseInteger);
-        assert_ffi_class::<U32F32x3>(ArgumentClass::IntegerSse);
-        assert_ffi_class::<U64x3>(ArgumentClass::Memory);
-        assert_ffi_class::<U128>(ArgumentClass::IntegerInteger);
-        assert_ffi_class::<U128x2>(ArgumentClass::Memory);
+        assert_ffi_class::<F32x2>(ValueClass::Sse);
+        assert_ffi_class::<U32F32>(ValueClass::Integer);
+        assert_ffi_class::<F64x2>(ValueClass::SseSse);
+        assert_ffi_class::<F64U64>(ValueClass::SseInteger);
+        assert_ffi_class::<U64F64>(ValueClass::IntegerSse);
+        assert_ffi_class::<U64x2>(ValueClass::IntegerInteger);
+        assert_ffi_class::<F32x3U32>(ValueClass::SseInteger);
+        assert_ffi_class::<U32F32x3>(ValueClass::IntegerSse);
+        assert_ffi_class::<U64x3>(ValueClass::Memory);
+        assert_ffi_class::<U128>(ValueClass::IntegerInteger);
+        assert_ffi_class::<U128x2>(ValueClass::Memory);
     }
 
     #[test]
     fn recursive_struct_classification() {
-        assert_ffi_class::<NestedF32x2x2>(ArgumentClass::SseSse);
-        assert_ffi_class::<NestedU8U32x2>(ArgumentClass::IntegerInteger);
-        assert_ffi_class::<NestedU8U64x2>(ArgumentClass::Memory);
-        assert_ffi_class::<NestedF64x2x2>(ArgumentClass::Memory);
+        assert_ffi_class::<NestedF32x2x2>(ValueClass::SseSse);
+        assert_ffi_class::<NestedU8U32x2>(ValueClass::IntegerInteger);
+        assert_ffi_class::<NestedU8U64x2>(ValueClass::Memory);
+        assert_ffi_class::<NestedF64x2x2>(ValueClass::Memory);
     }
 
     #[test]
     fn basic_union_classification() {
-        assert_ffi_class::<UnionI32U32>(ArgumentClass::Integer);
-        assert_ffi_class::<UnionU32F32>(ArgumentClass::Integer);
-        assert_ffi_class::<UnionU64F64>(ArgumentClass::Integer);
-        assert_ffi_class::<UnionU128>(ArgumentClass::IntegerInteger);
-        assert_ffi_class::<UnionU8U128>(ArgumentClass::IntegerInteger);
-        assert_ffi_class::<UnionU128U8>(ArgumentClass::IntegerInteger);
-        assert_ffi_class::<UnionNestedF64x2>(ArgumentClass::SseSse);
-        assert_ffi_class::<UnionNestedU64x2>(ArgumentClass::IntegerInteger);
+        assert_ffi_class::<UnionI32U32>(ValueClass::Integer);
+        assert_ffi_class::<UnionU32F32>(ValueClass::Integer);
+        assert_ffi_class::<UnionU64F64>(ValueClass::Integer);
+        assert_ffi_class::<UnionU128>(ValueClass::IntegerInteger);
+        assert_ffi_class::<UnionU8U128>(ValueClass::IntegerInteger);
+        assert_ffi_class::<UnionU128U8>(ValueClass::IntegerInteger);
+        assert_ffi_class::<UnionNestedF64x2>(ValueClass::SseSse);
+        assert_ffi_class::<UnionNestedU64x2>(ValueClass::IntegerInteger);
     }
 
     #[test]
     fn mixed_aggregate_union_classification() {
-        assert_ffi_class::<UnionNestedU8x3F32x2>(ArgumentClass::Integer);
-        assert_ffi_class::<UnionNestedF32x2U64>(ArgumentClass::Integer);
-        assert_ffi_class::<UnionNestedU16x3F64x2>(ArgumentClass::IntegerSse);
-        assert_ffi_class::<UnionNestedF32x4U32x4>(ArgumentClass::IntegerInteger);
-        assert_ffi_class::<UnionNestedF64x2U64x2>(ArgumentClass::IntegerInteger);
+        assert_ffi_class::<UnionNestedU8x3F32x2>(ValueClass::Integer);
+        assert_ffi_class::<UnionNestedF32x2U64>(ValueClass::Integer);
+        assert_ffi_class::<UnionNestedU16x3F64x2>(ValueClass::IntegerSse);
+        assert_ffi_class::<UnionNestedF32x4U32x4>(ValueClass::IntegerInteger);
+        assert_ffi_class::<UnionNestedF64x2U64x2>(ValueClass::IntegerInteger);
     }
 
     #[test]
     fn large_union_classification() {
-        assert_ffi_class::<UnionNestedF64x4U64x4>(ArgumentClass::Memory);
-        assert_ffi_class::<UnionNestedU64x4F64x4>(ArgumentClass::Memory);
+        assert_ffi_class::<UnionNestedF64x4U64x4>(ValueClass::Memory);
+        assert_ffi_class::<UnionNestedU64x4F64x4>(ValueClass::Memory);
     }
 
     #[test]
     fn nested_union_struct_classification() {
-        assert_ffi_class::<NestedUnionU32F32>(ArgumentClass::Integer);
-        assert_ffi_class::<NestedUnionU32F32x2>(ArgumentClass::Integer);
-        assert_ffi_class::<NestedU8UnionU64F64>(ArgumentClass::IntegerInteger);
-        assert_ffi_class::<NestedUnionU8U128U8>(ArgumentClass::Memory);
-        assert_ffi_class::<NestedU8UnionU128U8>(ArgumentClass::Memory);
+        assert_ffi_class::<NestedUnionU32F32>(ValueClass::Integer);
+        assert_ffi_class::<NestedUnionU32F32x2>(ValueClass::Integer);
+        assert_ffi_class::<NestedU8UnionU64F64>(ValueClass::IntegerInteger);
+        assert_ffi_class::<NestedUnionU8U128U8>(ValueClass::Memory);
+        assert_ffi_class::<NestedU8UnionU128U8>(ValueClass::Memory);
     }
 
     #[test]
@@ -263,22 +263,22 @@ mod tests {
         let one_floating_eightbyte =
             Type::create_union_from_slice(&[Type::F32, Type::F64]).unwrap();
         assert_eq!(
-            ArgumentClass::classify(&one_floating_eightbyte),
-            ArgumentClass::Sse,
+            ValueClass::classify(&one_floating_eightbyte),
+            ValueClass::Sse,
         );
 
         let first_sse_second_integer =
             Type::create_union_from_slice(&[F64U64::ffi_type(), F64x2::ffi_type()]).unwrap();
         assert_eq!(
-            ArgumentClass::classify(&first_sse_second_integer),
-            ArgumentClass::SseInteger,
+            ValueClass::classify(&first_sse_second_integer),
+            ValueClass::SseInteger,
         );
 
         for variants in [[Type::F32, Type::U32], [Type::U32, Type::F32]] {
             let integer_dominates = Type::create_union_from_slice(&variants).unwrap();
             assert_eq!(
-                ArgumentClass::classify(&integer_dominates),
-                ArgumentClass::Integer,
+                ValueClass::classify(&integer_dominates),
+                ValueClass::Integer,
             );
         }
 
@@ -286,16 +286,16 @@ mod tests {
         let union_at_nonzero_offset =
             Type::create_struct_from_slice(&[Type::U64, floating_union]).unwrap();
         assert_eq!(
-            ArgumentClass::classify(&union_at_nonzero_offset),
-            ArgumentClass::IntegerSse,
+            ValueClass::classify(&union_at_nonzero_offset),
+            ValueClass::IntegerSse,
         );
 
         let floating_union = Type::create_union_from_slice(&[Type::F64]).unwrap();
         let union_before_integer =
             Type::create_struct_from_slice(&[floating_union, Type::U64]).unwrap();
         assert_eq!(
-            ArgumentClass::classify(&union_before_integer),
-            ArgumentClass::SseInteger,
+            ValueClass::classify(&union_before_integer),
+            ValueClass::SseInteger,
         );
     }
 
