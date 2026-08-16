@@ -36,7 +36,7 @@
 //!
 //! // SAFETY: `function` was built from `add` with matching argument and return types.
 //! unsafe {
-//!     function.call([arg(&a), arg(&b)], ret(&mut result));
+//!     function.call(&[arg(&a), arg(&b)], ret(&mut result));
 //! }
 //!
 //! assert_eq!(result, 42);

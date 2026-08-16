@@ -15,10 +15,7 @@ pub struct MarshalPlan {
 }
 
 impl MarshalPlan {
-    pub fn build(
-        argument_types: &[Type],
-        return_type: Option<&Type>,
-    ) -> Self {
+    pub fn build(argument_types: &[Type], return_type: Option<&Type>) -> Self {
         let mut register_allocator = RegisterAllocator::default();
 
         let mut argument_moves: Vec<ArgumentMove> = Vec::with_capacity(argument_types.len());

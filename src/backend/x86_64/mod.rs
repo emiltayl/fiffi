@@ -2,9 +2,6 @@
 
 mod sysv;
 
-extern crate alloc;
-
-use alloc::vec::Vec;
 use core::mem::MaybeUninit;
 
 use crate::types::Type;
@@ -30,12 +27,10 @@ pub(crate) struct CallInterface {
 }
 
 impl CallInterface {
-    pub(crate) fn new(argument_types: Vec<Type>, return_type: Option<Type>, abi: Abi) -> Self {
-        let marshal_plan = AbiPlan::new(&argument_types, return_type.as_ref(), abi);
+    pub(crate) fn new(argument_types: &[Type], return_type: Option<&Type>, abi: Abi) -> Self {
+        let marshal_plan = AbiPlan::new(argument_types, return_type, abi);
 
-        CallInterface {
-            marshal_plan,
-        }
+        CallInterface { marshal_plan }
     }
 }
 

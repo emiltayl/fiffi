@@ -118,7 +118,7 @@ impl FnPtr {
 ///
 /// // SAFETY: `function` was built from `ping` which has the function signature `extern "C" fn()`.
 /// unsafe {
-///     function.call([], Ret::void());
+///     function.call(&[], Ret::void());
 /// }
 /// ```
 #[macro_export]

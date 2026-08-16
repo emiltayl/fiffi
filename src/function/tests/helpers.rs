@@ -18,7 +18,7 @@ macro_rules! call_ffi_fn {
         // SAFETY: For testing purposes only. It is assumed that the tests call functions with the
         // correct ABI and argument and return types.
         unsafe {
-            function.call(args, Ret::void());
+            function.call(&args, Ret::void());
         }
     }};
 
@@ -67,7 +67,7 @@ macro_rules! call_ffi_fn {
         // correct ABI and argument and return types. After call, `return_value` has been
         // initialized by `Function::call`.
         unsafe {
-            function.call(args, ret(&mut return_value.buffer));
+            function.call(&args, ret(&mut return_value.buffer));
 
             assert_eq!(
                 return_value.guard_1.into_inner(),

@@ -21,7 +21,7 @@
 //! // `extern "C" fn(i32, i32) -> i32`.
 //! let mut return_value = 0i32;
 //! unsafe {
-//!     function.call([arg(&1), arg(&2)], ret(&mut return_value));
+//!     function.call(&[arg(&1), arg(&2)], ret(&mut return_value));
 //! }
 //!
 //! assert_eq!(return_value, 3);
@@ -80,7 +80,7 @@ impl<'arg> Arg<'arg> {
         Self(arg_ptr, PhantomData)
     }
 
-    fn into_ptr(self) -> *mut c_void {
+    fn as_ptr(&self) -> *mut c_void {
         self.0
     }
 }
@@ -183,7 +183,7 @@ where
 ///
 /// // SAFETY: The function signature used to construct `function` matches `double`.
 /// unsafe {
-///     function.call([arg(&input)], ret(&mut output));
+///     function.call(&[arg(&input)], ret(&mut output));
 /// }
 ///
 /// assert_eq!(output, 42);
@@ -202,10 +202,7 @@ impl Function {
     /// libffi stores the number of arguments in a C `unsigned int`. If more than `c_uint::MAX`
     /// argument types are provided, only the first `c_uint::MAX` are retained in the prepared
     /// function signature.
-    pub fn new<'args, I>(fn_ptr: FnPtr, argument_types: I, return_type: Option<&Type>) -> Self
-    where
-        I: IntoIterator<Item = &'args Type>,
-    {
+    pub fn new(fn_ptr: FnPtr, argument_types: &[Type], return_type: Option<&Type>) -> Self {
         Self::with_abi(fn_ptr, argument_types, return_type, Abi::default())
     }
 
@@ -256,7 +253,7 @@ impl Function {
     /// // function signature for `snprintf` with a single `i32` variadic argument.
     /// unsafe {
     ///     function.call(
-    ///         [
+    ///         &[
     ///             arg(&output_buffer.as_mut_ptr()),
     ///             arg(&output_buffer.len()),
     ///             arg(&format),
@@ -270,16 +267,12 @@ impl Function {
     /// assert_eq!(return_value as usize, expected.len() - 1);
     /// assert_eq!(expected, &output_buffer[0..expected.len()]);
     /// ```
-    pub fn variadic<'fixed_args, 'variadic_args, I1, I2>(
+    pub fn variadic(
         fn_ptr: FnPtr,
-        fixed_argument_types: I1,
-        variadic_argument_types: I2,
+        fixed_argument_types: &[Type],
+        variadic_argument_types: &[VariadicType],
         return_type: Option<&Type>,
-    ) -> Self
-    where
-        I1: IntoIterator<Item = &'fixed_args Type>,
-        I2: IntoIterator<Item = &'variadic_args VariadicType>,
-    {
+    ) -> Self {
         Self::variadic_with_abi(
             fn_ptr,
             fixed_argument_types,
@@ -296,20 +289,13 @@ impl Function {
     /// libffi stores the number of arguments in a C `unsigned int`. If more than `c_uint::MAX`
     /// argument types are provided, only the first `c_uint::MAX` are retained in the prepared
     /// function signature.
-    pub fn with_abi<'args, I>(
+    pub fn with_abi(
         fn_ptr: FnPtr,
-        argument_types: I,
+        argument_types: &[Type],
         return_type: Option<&Type>,
         abi: Abi,
-    ) -> Self
-    where
-        I: IntoIterator<Item = &'args Type>,
-    {
-        let call_interface = CallInterface::new(
-            argument_types.into_iter().cloned().collect(),
-            return_type.cloned(),
-            abi,
-        );
+    ) -> Self {
+        let call_interface = CallInterface::new(argument_types, return_type, abi);
 
         Self {
             call_interface,
@@ -329,17 +315,13 @@ impl Function {
     /// function signature.
     ///
     /// Fixed arguments are retained before variadic arguments if the signature is truncated.
-    pub fn variadic_with_abi<'fixed_args, 'variadic_args, I1, I2>(
+    pub fn variadic_with_abi(
         _fn_ptr: FnPtr,
-        _fixed_argument_types: I1,
-        _variadic_argument_types: I2,
+        _fixed_argument_types: &[Type],
+        _variadic_argument_types: &[VariadicType],
         _return_type: Option<&Type>,
         _abi: Abi,
-    ) -> Self
-    where
-        I1: IntoIterator<Item = &'fixed_args Type>,
-        I2: IntoIterator<Item = &'variadic_args VariadicType>,
-    {
+    ) -> Self {
         todo!();
     }
 
@@ -414,15 +396,12 @@ impl Function {
     ///
     /// // SAFETY: The function pointer, argument type, return type, and storage match `add_one`.
     /// unsafe {
-    ///     function.call([arg(&input)], ret(&mut output));
+    ///     function.call(&[arg(&input)], ret(&mut output));
     /// }
     ///
     /// assert_eq!(output, 42);
     /// ```
-    pub unsafe fn call<'arg, I>(&self, _args: I, _ret: Ret)
-    where
-        I: IntoIterator<Item = Arg<'arg>>,
-    {
+    pub unsafe fn call(&self, _args: &[Arg<'_>], _ret: Ret) {
         todo!();
     }
 
@@ -550,11 +529,8 @@ impl<State> FunctionBuilder<State> {
 
     /// Add multiple arguments to the function signature.
     #[must_use]
-    pub fn args<I>(mut self, types: I) -> Self
-    where
-        I: IntoIterator<Item = Type>,
-    {
-        self.argument_types.extend(types);
+    pub fn args(mut self, types: &[Type]) -> Self {
+        self.argument_types.extend_from_slice(types);
         self
     }
 }
@@ -655,11 +631,8 @@ impl<State> VariadicFunctionBuilder<State> {
 
     /// Add multiple fixed arguments to the function signature.
     #[must_use]
-    pub fn fixed_args<I>(mut self, types: I) -> Self
-    where
-        I: IntoIterator<Item = Type>,
-    {
-        self.fixed_argument_types.extend(types);
+    pub fn fixed_args(mut self, types: &[Type]) -> Self {
+        self.fixed_argument_types.extend_from_slice(types);
         self
     }
 
@@ -672,11 +645,8 @@ impl<State> VariadicFunctionBuilder<State> {
 
     /// Add multiple variadic arguments to the function signature.
     #[must_use]
-    pub fn variadic_args<I>(mut self, types: I) -> Self
-    where
-        I: IntoIterator<Item = VariadicType>,
-    {
-        self.variadic_argument_types.extend(types);
+    pub fn variadic_args(mut self, types: &[VariadicType]) -> Self {
+        self.variadic_argument_types.extend_from_slice(types);
         self
     }
 }

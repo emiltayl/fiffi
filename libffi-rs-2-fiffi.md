@@ -46,7 +46,7 @@ let mut result = 0f64;
 // SAFETY: `function` was built from `add` with matching argument and return
 // types, and `result` is valid storage for the return value.
 unsafe {
-    function.call([arg(&5f64), arg(&6f64)], ret(&mut result));
+    function.call(&[arg(&5f64), arg(&6f64)], ret(&mut result));
 }
 
 assert_eq!(result, 11f64);
