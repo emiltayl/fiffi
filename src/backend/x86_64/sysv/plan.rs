@@ -12,6 +12,9 @@ pub struct MarshalPlan {
 
     /// The size of the buffer containing arguments passed on the stack.
     stack_buffer_size: usize,
+
+    /// How the function returns its value.
+    return_strategy: ReturnStrategy,
 }
 
 impl MarshalPlan {
@@ -23,12 +26,12 @@ impl MarshalPlan {
         let mut stack_buffer_size: usize = 0;
         let mut stack_arguments: Vec<(usize, FfiTypeLayout)> = Vec::new();
 
-        let return_class = return_type.map(ValueClass::classify);
+        let return_strategy = ReturnStrategy::for_return_type(return_type);
 
         // Reserve the first argument register for the hidden return pointer if the return type's
-        // class is memory. There is always a register available at the start, so we do not need to
-        // check `RegisterAllocator::allocate`'s return value.
-        if matches!(return_class, Some(ValueClass::Memory)) {
+        // strategy is memory. There is always a register available at the start, so we do not need
+        // to check `RegisterAllocator::allocate`'s return value.
+        if return_strategy == ReturnStrategy::Memory {
             register_allocator.allocate(RegisterRequirements::One(RegisterBank::Gpr));
         }
 
@@ -87,6 +90,7 @@ impl MarshalPlan {
         MarshalPlan {
             argument_moves,
             stack_buffer_size,
+            return_strategy,
         }
     }
 }
@@ -135,9 +139,13 @@ struct ArgumentMove {
 const GPR_ARGUMENT_REGISTER_COUNT: usize = 6;
 const XMM_ARGUMENT_REGISTER_COUNT: usize = 8;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// A bank of registers used to pass or return values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RegisterBank {
+    /// General-purpose registers.
     Gpr,
+
+    /// XMM registers.
     Xmm,
 }
 
@@ -148,6 +156,48 @@ impl RegisterBank {
 
     fn xmm_count(self) -> usize {
         usize::from(self == RegisterBank::Xmm)
+    }
+}
+
+/// Describes how a function returns its value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReturnStrategy {
+    /// The function does not return a value.
+    Void,
+
+    /// The function writes its result through a hidden pointer to caller-provided memory.
+    ///
+    /// This is distinct from returning a pointer value, which uses [`Self::SingleRegister`] with
+    /// [`RegisterBank::Gpr`].
+    Memory,
+
+    /// The function returns its value in one register.
+    SingleRegister {
+        /// The bank containing the return register.
+        bank: RegisterBank,
+
+        /// The number of result bytes provided in the register.
+        byte_length: u8,
+    },
+
+    /// The function returns its value in two registers.
+    TwoRegisters {
+        /// The bank containing the first eightbyte of the result.
+        first_bank: RegisterBank,
+
+        /// The bank containing the second eightbyte of the result.
+        second_bank: RegisterBank,
+
+        /// The number of result bytes provided in the second register.
+        ///
+        /// The first register always provides eight bytes.
+        second_byte_length: u8,
+    },
+}
+
+impl ReturnStrategy {
+    fn for_return_type(return_type: Option<&Type>) -> Self {
+        todo!();
     }
 }
 
@@ -320,6 +370,84 @@ mod tests {
 
     fn struct_type(fields: &[Type]) -> Type {
         Type::create_struct_from_slice(fields).expect("Test struct must contain at least one field")
+    }
+
+    #[test]
+    fn return_strategies_follow_return_classes_and_layout_lengths() {
+        let integer_sse = struct_type(&[Type::U32, Type::U32, Type::F32]);
+        let sse_integer = struct_type(&[Type::F32, Type::F32, Type::U32]);
+        let sse_sse = struct_type(&[Type::F32, Type::F32, Type::F32]);
+        let memory = struct_type(&[Type::U64, Type::U64, Type::U64]);
+
+        let cases = [
+            (None, ReturnStrategy::Void),
+            (
+                Some(Type::U8),
+                ReturnStrategy::SingleRegister {
+                    bank: RegisterBank::Gpr,
+                    byte_length: 1,
+                },
+            ),
+            (
+                Some(Type::Pointer),
+                ReturnStrategy::SingleRegister {
+                    bank: RegisterBank::Gpr,
+                    byte_length: 8,
+                },
+            ),
+            (
+                Some(Type::F32),
+                ReturnStrategy::SingleRegister {
+                    bank: RegisterBank::Xmm,
+                    byte_length: 4,
+                },
+            ),
+            (
+                Some(Type::F64),
+                ReturnStrategy::SingleRegister {
+                    bank: RegisterBank::Xmm,
+                    byte_length: 8,
+                },
+            ),
+            (
+                Some(Type::U128),
+                ReturnStrategy::TwoRegisters {
+                    first_bank: RegisterBank::Gpr,
+                    second_bank: RegisterBank::Gpr,
+                    second_byte_length: 8,
+                },
+            ),
+            (
+                Some(integer_sse),
+                ReturnStrategy::TwoRegisters {
+                    first_bank: RegisterBank::Gpr,
+                    second_bank: RegisterBank::Xmm,
+                    second_byte_length: 4,
+                },
+            ),
+            (
+                Some(sse_integer),
+                ReturnStrategy::TwoRegisters {
+                    first_bank: RegisterBank::Xmm,
+                    second_bank: RegisterBank::Gpr,
+                    second_byte_length: 4,
+                },
+            ),
+            (
+                Some(sse_sse),
+                ReturnStrategy::TwoRegisters {
+                    first_bank: RegisterBank::Xmm,
+                    second_bank: RegisterBank::Xmm,
+                    second_byte_length: 4,
+                },
+            ),
+            (Some(memory), ReturnStrategy::Memory),
+        ];
+
+        for (return_type, expected_strategy) in cases {
+            let plan = MarshalPlan::build(&[], return_type.as_ref());
+            assert_eq!(plan.return_strategy, expected_strategy);
+        }
     }
 
     #[test]
