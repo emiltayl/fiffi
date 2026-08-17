@@ -8,17 +8,17 @@ use crate::types::{FfiTypeLayout, Type};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct MarshalPlan {
     /// Where to put arguments to prepare for a function call.
-    argument_moves: Vec<ArgumentMove>,
+    pub(super) argument_moves: Vec<ArgumentMove>,
 
     /// The size of the buffer containing arguments passed on the stack.
-    stack_buffer_size: usize,
+    pub(super) stack_buffer_size: usize,
 
     /// How the function returns its value.
-    return_strategy: ReturnStrategy,
+    pub(super) return_strategy: ReturnStrategy,
 }
 
 impl MarshalPlan {
-    pub fn build(argument_types: &[Type], return_type: Option<&Type>) -> Self {
+    pub(super) fn build(argument_types: &[Type], return_type: Option<&Type>) -> Self {
         let mut register_allocator = RegisterAllocator::default();
 
         let mut argument_moves: Vec<ArgumentMove> = Vec::with_capacity(argument_types.len());
@@ -97,7 +97,7 @@ impl MarshalPlan {
 
 /// Where an argument should be placed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum ArgumentDestination {
+pub(super) enum ArgumentDestination {
     /// Place argument in a general purpose register.
     ///
     /// The `usize` is the index in the integer register array.
@@ -117,9 +117,9 @@ enum ArgumentDestination {
 
 /// Instructions for Rust for how to prepare arguments for function calls.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ArgumentMove {
+pub(super) struct ArgumentMove {
     /// The index of the argument to move.
-    argument_index: usize,
+    pub(super) argument_index: usize,
 
     /// The offset from the source pointer to start moving data from.
     ///
@@ -127,13 +127,13 @@ struct ArgumentMove {
     ///
     /// This could potentially be something smaller than an usize? Would it shrink this struct
     /// though?
-    source_offset: usize,
+    pub(super) source_offset: usize,
 
     /// The number of bytes to move to `destination`.
-    size: usize,
+    pub(super) size: usize,
 
     /// Where the argument should be moved to.
-    destination: ArgumentDestination,
+    pub(super) destination: ArgumentDestination,
 }
 
 const GPR_ARGUMENT_REGISTER_COUNT: usize = 6;
@@ -141,7 +141,7 @@ const XMM_ARGUMENT_REGISTER_COUNT: usize = 8;
 
 /// A bank of registers used to pass or return values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RegisterBank {
+pub(super) enum RegisterBank {
     /// General-purpose registers.
     Gpr,
 
@@ -161,7 +161,7 @@ impl RegisterBank {
 
 /// Describes how a function returns its value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReturnStrategy {
+pub(super) enum ReturnStrategy {
     /// The function does not return a value.
     Void,
 

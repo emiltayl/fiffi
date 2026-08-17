@@ -36,13 +36,13 @@ impl CallInterface {
 
 #[derive(Clone, Debug)]
 enum AbiPlan {
-    SysV(sysv::MarshalPlan),
+    SysV(sysv::CallInterface),
 }
 
 impl AbiPlan {
-    pub(crate) fn new(argument_types: &[Type], return_type: Option<&Type>, abi: Abi) -> Self {
+    fn new(argument_types: &[Type], return_type: Option<&Type>, abi: Abi) -> Self {
         match abi {
-            Abi::SysV => Self::SysV(sysv::MarshalPlan::build(argument_types, return_type)),
+            Abi::SysV => Self::SysV(sysv::CallInterface::new(argument_types, return_type)),
         }
     }
 }
