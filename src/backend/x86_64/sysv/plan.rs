@@ -6,7 +6,7 @@ use super::classification::ValueClass;
 use crate::types::{FfiTypeLayout, Type};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MarshalPlan {
+pub(super) struct MarshalPlan {
     /// Where to put arguments to prepare for a function call.
     argument_moves: Vec<ArgumentMove>,
 
@@ -31,7 +31,7 @@ impl MarshalPlan {
         // Reserve the first argument register for the hidden return pointer if the return type's
         // strategy is memory. There is always a register available at the start, so we do not need
         // to check `RegisterAllocator::allocate`'s return value.
-        if return_strategy == ReturnStrategy::Memory {
+        if return_strategy == ReturnStrategy::HiddenPointer {
             register_allocator.allocate(RegisterRequirements::One(RegisterBank::Gpr));
         }
 
@@ -169,14 +169,14 @@ enum ReturnStrategy {
     ///
     /// This is distinct from returning a pointer value, which uses [`Self::SingleRegister`] with
     /// [`RegisterBank::Gpr`].
-    Memory,
+    HiddenPointer,
 
     /// The function returns its value in one register.
     SingleRegister {
         /// The bank containing the return register.
         bank: RegisterBank,
 
-        /// The number of result bytes provided in the register.
+        /// The number of bytes in the result type.
         byte_length: u8,
     },
 
@@ -188,7 +188,7 @@ enum ReturnStrategy {
         /// The bank containing the second eightbyte of the result.
         second_bank: RegisterBank,
 
-        /// The number of result bytes provided in the second register.
+        /// The number of bytes in the result type stored in the second register.
         ///
         /// The first register always provides eight bytes.
         second_byte_length: u8,
@@ -441,7 +441,7 @@ mod tests {
                     second_byte_length: 4,
                 },
             ),
-            (Some(memory), ReturnStrategy::Memory),
+            (Some(memory), ReturnStrategy::HiddenPointer),
         ];
 
         for (return_type, expected_strategy) in cases {
