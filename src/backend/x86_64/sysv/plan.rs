@@ -40,7 +40,7 @@ impl MarshalPlan {
 
             let argument_class = ValueClass::classify(argument);
 
-            let allocation = RegisterRequirements::for_argument_class(argument_class)
+            let allocation = RegisterRequirements::for_value_class(argument_class)
                 .and_then(|requirements| register_allocator.allocate(requirements));
 
             match allocation {
@@ -197,7 +197,27 @@ pub(super) enum ReturnStrategy {
 
 impl ReturnStrategy {
     fn for_return_type(return_type: Option<&Type>) -> Self {
-        todo!();
+        let Some(return_type) = return_type else {
+            return Self::Void;
+        };
+
+        let Some(register_requirements) =
+            RegisterRequirements::for_value_class(ValueClass::classify(return_type))
+        else {
+            return Self::HiddenPointer;
+        };
+
+        let byte_length = u8::try_from(return_type.layout().size)
+            .expect("register return types cannot exceed 16 bytes");
+
+        match register_requirements {
+            RegisterRequirements::One(bank) => Self::SingleRegister { bank, byte_length },
+            RegisterRequirements::Two(first_bank, second_bank) => Self::TwoRegisters {
+                first_bank,
+                second_bank,
+                second_byte_length: byte_length - 8,
+            },
+        }
     }
 }
 
@@ -208,11 +228,11 @@ enum RegisterRequirements {
 }
 
 impl RegisterRequirements {
-    fn for_argument_class(argument_class: ValueClass) -> Option<Self> {
+    fn for_value_class(value_class: ValueClass) -> Option<Self> {
         use RegisterBank::{Gpr, Xmm};
         use RegisterRequirements::{One, Two};
 
-        match argument_class {
+        match value_class {
             ValueClass::Integer => Some(One(Gpr)),
             ValueClass::IntegerInteger => Some(Two(Gpr, Gpr)),
             ValueClass::IntegerSse => Some(Two(Gpr, Xmm)),
