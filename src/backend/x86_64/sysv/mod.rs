@@ -10,7 +10,7 @@ use plan::MarshalPlan;
 use crate::types::Type;
 
 #[derive(Clone, Debug)]
-pub(super) struct CallInterface {
+pub(crate) struct CallInterface {
     marshal_plan: MarshalPlan,
 }
 

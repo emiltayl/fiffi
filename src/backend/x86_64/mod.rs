@@ -22,25 +22,12 @@ impl Abi {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct CallInterface {
-    marshal_plan: AbiPlan,
+pub(crate) enum CallInterface {
+    SysV(sysv::CallInterface),
 }
 
 impl CallInterface {
     pub(crate) fn new(argument_types: &[Type], return_type: Option<&Type>, abi: Abi) -> Self {
-        let marshal_plan = AbiPlan::new(argument_types, return_type, abi);
-
-        CallInterface { marshal_plan }
-    }
-}
-
-#[derive(Clone, Debug)]
-enum AbiPlan {
-    SysV(sysv::CallInterface),
-}
-
-impl AbiPlan {
-    fn new(argument_types: &[Type], return_type: Option<&Type>, abi: Abi) -> Self {
         match abi {
             Abi::SysV => Self::SysV(sysv::CallInterface::new(argument_types, return_type)),
         }
