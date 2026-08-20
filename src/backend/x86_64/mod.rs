@@ -51,7 +51,6 @@ impl AbiPlan {
 #[repr(align(8))]
 struct Register([MaybeUninit<u8>; 8]);
 
-// TODO default all 0
 impl Default for Register {
     fn default() -> Self {
         Self([MaybeUninit::new(0u8); 8])
