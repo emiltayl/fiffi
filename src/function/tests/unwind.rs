@@ -6,6 +6,7 @@ macro_rules! unwind_tests_for_abi {
             use std::panic::{catch_unwind, panic_any};
 
             use crate::function::tests::helpers::call_ffi_fn;
+            use crate::test_utils::structs::{U8X3_ARG, U8x3, U64X2_ARG, U64x2};
 
             #[derive(Debug)]
             struct UnwindMarker;
@@ -67,6 +68,40 @@ macro_rules! unwind_tests_for_abi {
                             usize = 0, usize = 1, usize = 2, usize = 3, usize = 4, usize = 5,
                             usize = 6, usize = 7, usize = 8, usize = 9, usize = 10, usize = 11,
                             usize = 12, usize = 13, usize = 14, usize = 15,
+                        )
+                    );
+                });
+
+                assert_unwind_marker(result);
+            }
+
+            #[test]
+            fn panic_unwinds_with_mixed_indirect_arguments() {
+                extern $extern_abi fn test_callback(
+                    integer_1: usize,
+                    large_aggregate: U64x2,
+                    float: f64,
+                    integer_2: usize,
+                    odd_sized_aggregate: U8x3,
+                ) {
+                    assert_eq!(integer_1, 0x1111);
+                    assert_eq!(large_aggregate, U64X2_ARG);
+                    assert_eq!(float, 3.5);
+                    assert_eq!(integer_2, 0x4444);
+                    assert_eq!(odd_sized_aggregate, U8X3_ARG);
+
+                    panic_any(UnwindMarker);
+                }
+
+                let result = catch_unwind(|| {
+                    call_ffi_fn!(
+                        abi: $abi,
+                        test_callback(
+                            usize = 0x1111usize,
+                            U64x2 = U64X2_ARG,
+                            f64 = 3.5f64,
+                            usize = 0x4444usize,
+                            U8x3 = U8X3_ARG,
                         )
                     );
                 });

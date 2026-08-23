@@ -5,7 +5,9 @@ macro_rules! pass_by_value_tests_for_abi {
             use core::ptr;
 
             use crate::function::tests::helpers::call_ffi_fn;
-            use crate::test_utils::structs::{U32X17_ARG, U32x17, U64X4_ARG, U64x4};
+            use crate::test_utils::structs::{
+                U8X3_ARG, U8x3, U32X17_ARG, U32x17, U64X2_ARG, U64X4_ARG, U64x2, U64x4,
+            };
             use crate::test_utils::unions::{
                 UNION_NESTED_U64X4_F64X4_ARG, UnionNestedU64x4F64x4,
             };
@@ -16,6 +18,10 @@ macro_rules! pass_by_value_tests_for_abi {
                 c: 0,
                 d: 0,
             };
+
+            const MODIFIED_ODD_SIZED_STRUCT: U8x3 = U8x3 { a: 0, b: 0, c: 0 };
+
+            const MODIFIED_SIXTEEN_BYTE_STRUCT: U64x2 = U64x2 { a: 0, b: 0 };
 
             const MODIFIED_VERY_LARGE_STRUCT: U32x17 = U32x17 {
                 a: 0,
@@ -40,6 +46,67 @@ macro_rules! pass_by_value_tests_for_abi {
             const MODIFIED_UNION: UnionNestedU64x4F64x4 = UnionNestedU64x4F64x4 {
                 i: MODIFIED_STRUCT,
             };
+
+            #[test]
+            fn odd_sized_struct_is_passed_by_value() {
+                extern $extern_abi fn test_callback(mut arg: U8x3) {
+                    assert_eq!(arg, U8X3_ARG);
+
+                    // SAFETY: `arg` is a valid, aligned local value. A volatile write makes sure
+                    // the callback actually modifies the storage used for its by-value argument.
+                    unsafe {
+                        ptr::write_volatile(&raw mut arg, MODIFIED_ODD_SIZED_STRUCT);
+                    }
+                }
+
+                let original = UnsafeCell::new(U8X3_ARG);
+                call_ffi_fn!(abi: $abi, test_callback(U8x3 = original));
+
+                assert_eq!(original.into_inner(), U8X3_ARG);
+            }
+
+            #[test]
+            fn sixteen_byte_struct_is_passed_by_value() {
+                extern $extern_abi fn test_callback(mut arg: U64x2) {
+                    assert_eq!(arg, U64X2_ARG);
+
+                    // SAFETY: `arg` is a valid, aligned local value. A volatile write makes sure
+                    // the callback actually modifies the storage used for its by-value argument.
+                    unsafe {
+                        ptr::write_volatile(&raw mut arg, MODIFIED_SIXTEEN_BYTE_STRUCT);
+                    }
+                }
+
+                let original = UnsafeCell::new(U64X2_ARG);
+                call_ffi_fn!(abi: $abi, test_callback(U64x2 = original));
+
+                assert_eq!(original.into_inner(), U64X2_ARG);
+            }
+
+            #[test]
+            fn duplicate_indirect_arguments_are_independent() {
+                extern $extern_abi fn test_callback(mut first: U64x2, second: U64x2) {
+                    assert_eq!(first, U64X2_ARG);
+                    assert_eq!(second, U64X2_ARG);
+
+                    // SAFETY: `first` is a valid, aligned local value. The volatile write ensures
+                    // that changing it cannot be optimized away or affect `second` through an
+                    // incorrectly shared by-value argument copy.
+                    unsafe {
+                        ptr::write_volatile(&raw mut first, MODIFIED_SIXTEEN_BYTE_STRUCT);
+                    }
+
+                    assert_eq!(second, U64X2_ARG);
+                }
+
+                let original = UnsafeCell::new(U64X2_ARG);
+                call_ffi_fn!(
+                    abi: $abi,
+                    test_callback(U64x2 = original, U64x2 = original)
+                );
+
+                assert_eq!(original.into_inner(), U64X2_ARG);
+            }
 
             #[test]
             fn large_struct_is_passed_by_value() {

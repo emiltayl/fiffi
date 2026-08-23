@@ -10,7 +10,8 @@ macro_rules! call_shape_tests_for_abi {
             use crate::function::tests::helpers::call_ffi_fn;
             use crate::test_utils::I128_ARG;
             use crate::test_utils::structs::{
-                NESTED_F32X2X2_ARG, NestedF32x2x2, U32X2_ARG, U32x2, U64x3,
+                NESTED_F32X2X2_ARG, NestedF32x2x2, U8X3_ARG, U8x3, U32X2_ARG, U32x2,
+                U64X3_ARG, U64x3,
             };
 
             #[rustfmt::skip]
@@ -163,6 +164,96 @@ macro_rules! call_shape_tests_for_abi {
                     ) -> f64
                 );
                 assert_eq!(return_value, 190.0);
+            }
+
+            #[test]
+            fn mixed_arguments_cross_register_boundary() {
+                extern $extern_abi fn test_callback(
+                    integer_1: usize,
+                    float_1: f64,
+                    integer_2: usize,
+                    float_2: f32,
+                    stack_float: f64,
+                ) -> usize {
+                    assert_eq!(integer_1, 0x1111);
+                    assert_eq!(float_1, 2.5);
+                    assert_eq!(integer_2, 0x3333);
+                    assert_eq!(float_2, 4.5);
+                    assert_eq!(stack_float, 5.25);
+
+                    0x5555
+                }
+
+                let return_value = call_ffi_fn!(
+                    abi: $abi,
+                    test_callback(
+                        usize = 0x1111usize,
+                        f64 = 2.5f64,
+                        usize = 0x3333usize,
+                        f32 = 4.5f32,
+                        f64 = 5.25f64,
+                    ) -> usize
+                );
+                assert_eq!(return_value, 0x5555);
+            }
+
+            #[test]
+            fn indirect_aggregate_consumes_one_position() {
+                extern $extern_abi fn test_callback(
+                    integer_1: usize,
+                    aggregate: U8x3,
+                    float: f64,
+                    integer_2: usize,
+                    stack_float: f32,
+                ) -> usize {
+                    assert_eq!(integer_1, 0x1111);
+                    assert_eq!(aggregate, U8X3_ARG);
+                    assert_eq!(float, 3.5);
+                    assert_eq!(integer_2, 0x4444);
+                    assert_eq!(stack_float, 5.5);
+
+                    0x5555
+                }
+
+                let return_value = call_ffi_fn!(
+                    abi: $abi,
+                    test_callback(
+                        usize = 0x1111usize,
+                        U8x3 = U8X3_ARG,
+                        f64 = 3.5f64,
+                        usize = 0x4444usize,
+                        f32 = 5.5f32,
+                    ) -> usize
+                );
+                assert_eq!(return_value, 0x5555);
+            }
+
+            #[test]
+            fn hidden_return_shifts_mixed_arguments() {
+                extern $extern_abi fn test_callback(
+                    integer_1: usize,
+                    float_1: f64,
+                    integer_2: usize,
+                    stack_float: f32,
+                ) -> U64x3 {
+                    assert_eq!(integer_1, 0x1111);
+                    assert_eq!(float_1, 2.5);
+                    assert_eq!(integer_2, 0x3333);
+                    assert_eq!(stack_float, 4.5);
+
+                    U64X3_ARG
+                }
+
+                let return_value = call_ffi_fn!(
+                    abi: $abi,
+                    test_callback(
+                        usize = 0x1111usize,
+                        f64 = 2.5f64,
+                        usize = 0x3333usize,
+                        f32 = 4.5f32,
+                    ) -> U64x3
+                );
+                assert_eq!(return_value, U64X3_ARG);
             }
 
             #[rustfmt::skip]
