@@ -32,6 +32,7 @@ ABIs on common platforms, and then branch out from there as needed.
 
 # Work log
 
+* 2026-08-23 x86_64 SysV function call support.
 * 2026-07-12 Got started with argument marshalling plan generation.
 * 2026-07-10 Added function call test suite added with 308 failing tests. Got started preparing for
   code for x86_64 SysV calls.
