@@ -80,7 +80,7 @@ impl<'arg> Arg<'arg> {
         Self(arg_ptr, PhantomData)
     }
 
-    fn as_ptr(&self) -> *mut c_void {
+    pub(crate) fn as_ptr(&self) -> *mut c_void {
         self.0
     }
 }
@@ -145,7 +145,7 @@ impl<'ret> Ret<'ret> {
         Self(null_mut(), PhantomData)
     }
 
-    fn into_ptr(self) -> *mut c_void {
+    pub(crate) fn as_ptr(&self) -> *mut c_void {
         self.0
     }
 }
@@ -364,7 +364,7 @@ impl Function {
         }
     }
 
-    /// Calls the wrapped function pointer through libffi.
+    /// Calls the wrapped function pointer.
     ///
     /// # Safety
     ///
@@ -376,9 +376,6 @@ impl Function {
     ///   return type.
     /// * Calling the target function must not violate Rust aliasing rules for any referenced
     ///   memory.
-    ///
-    /// If more than `c_uint::MAX` argument types were provided during construction, libffi will use
-    /// the truncated signature and may not read every argument pointer provided in `args`.
     ///
     /// # Example
     ///
@@ -401,8 +398,10 @@ impl Function {
     ///
     /// assert_eq!(output, 42);
     /// ```
-    pub unsafe fn call(&self, _args: &[Arg<'_>], _ret: Ret) {
-        todo!();
+    pub unsafe fn call(&self, args: &[Arg<'_>], ret: Ret) {
+        // SAFETY: The caller must uphold this method's safety contract, which is the same contract
+        // required by `CallInterface::call`.
+        unsafe { self.call_interface.call(self.fn_ptr, args, ret) };
     }
 
     /// Returns the memory layout of this `Function`'s arguments.

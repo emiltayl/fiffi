@@ -12,10 +12,10 @@ ABIs on common platforms, and then branch out from there as needed.
 
 * [x] `Type` size and layout functionality
 * [x] Initial test suite for function calls
-* [ ] 64-bit x86 SysV ABI for function calls
+* [x] 64-bit x86 SysV ABI for function calls
   * [x] Argument, return value classification
-  * [ ] Plan for marshalling arguments
-  * [ ] Assembly: argument marshalling, the call and return value handling
+  * [x] Plan for marshalling arguments
+  * [x] Assembly: argument marshalling, the call and return value handling
 * [ ] Support discarding return value, add tests for this
 * [ ] Take args by reference in `Function::call`
 * [ ] Review test suite for missing test cases
