@@ -1,5 +1,14 @@
 use crate::types::Type;
 
+// TODO Win64 does not classify values in the same manner
+// * Integers <= 64 bits -> Integer slot. Return in RAX.
+// * F32, F64 -> Float slot. Return in XMM0.
+// * Struct/union with size 1, 2, 4, or 8 bytes -> Integer slot. Return in RAX.
+// * Other structs/unions, make a copy and provide a pointer sent in an integer slot. These are
+//   returned via a "hidden" result pointer. Copies must be at least aligned to 16 bytes.
+// * I128, U128 -> make a copy and provide a pointer sent in an integer slot. Note that this is
+//   returned in xmm0 (all 128 bits).
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ValueClass {
     Integer,

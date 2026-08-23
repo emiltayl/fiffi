@@ -12,16 +12,16 @@ use crate::types::Type;
 /// ABI constants for 64-bit x86 targets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum Abi {
-    #[default]
+    #[cfg_attr(not(windows), default)]
     SysV,
-    // TODO implement after SysV
-    //Win64,
+    #[cfg_attr(windows, default)]
+    Win64,
 }
 
 impl Abi {
     #[cfg(test)]
     #[doc(hidden)]
-    pub const ABIS: [Self; 1] = [Self::SysV];
+    pub const ABIS: [Self; 2] = [Self::SysV, Self::Win64];
 }
 
 #[derive(Clone, Debug)]
@@ -33,6 +33,7 @@ impl CallInterface {
     pub(crate) fn new(argument_types: &[Type], return_type: Option<&Type>, abi: Abi) -> Self {
         match abi {
             Abi::SysV => Self::SysV(sysv::CallInterface::new(argument_types, return_type)),
+            Abi::Win64 => todo!(),
         }
     }
 

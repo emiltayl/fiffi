@@ -10,6 +10,9 @@ use crate::backend::x86_64::Register;
 use crate::backend::x86_64::asm::trampoline_asm_with_unwind_frame;
 use crate::function::{Arg, Ret};
 
+// TODO Fix assembly for Win64. Note that 32 bytes need to be reserved on the stack prior to any
+// `call`.
+
 #[derive(Debug)]
 struct CallFrame {
     /// Arguments passed in integer registers. The two first elements are also used for return

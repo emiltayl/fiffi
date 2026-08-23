@@ -5,6 +5,17 @@ use alloc::vec::Vec;
 use super::classification::ValueClass;
 use crate::types::{FfiTypeLayout, Type};
 
+// TODO Win64 passes at most four arguments in registers.
+// RCX, RDX, R8, and R9 and XMM0 - XMM3 is used to pass arguments.
+// Note that a function that accepts on int and one float receives the int in RCX while the float is
+// passed in XMM1.
+// 
+// For Win64 we need to make copies of structs that are not passed in registers (see classification
+// module), make sure to account for that in stack buffer size and moves. Argument copies must be
+// aligned to at least 16 bytes. The actual arguments are aligned to 8 bytes. 
+//
+// Return values are either passed in a single register, by hidden pointer, or XMM0 for I128/U128.
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct MarshalPlan {
     /// Where to put arguments to prepare for a function call.

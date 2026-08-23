@@ -77,3 +77,13 @@ function_tests_for_abi! {
         float_regs: [xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7],
     }
 }
+
+#[cfg(target_arch = "x86_64")]
+function_tests_for_abi! {
+    mod x86_64_win64 {
+        abi: Abi::Win64,
+        extern_abi: "win64-unwind",
+        gpr_regs: [rcx, rdx, r8, r9],
+        float_regs: [xmm0, xmm1, xmm2, xmm3],
+    }
+}
