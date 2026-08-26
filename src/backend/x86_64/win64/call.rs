@@ -15,12 +15,12 @@ use crate::function::{Arg, Ret};
 
 #[derive(Debug)]
 struct CallFrame {
-    /// Arguments passed in integer registers. The two first elements are also used for return
-    /// values passed in integer registers.
-    gpr_registers: [Register; 6],
+    /// Arguments passed in integer registers. The first element is also used for return values
+    /// passed in rax.
+    gpr_registers: [Register; 4],
     /// Arguments passed in xmm registers. The two first elements are also used for return values
-    /// values passed in xmm registers.
-    xmm_registers: [Register; 8],
+    /// values passed in xmm0.
+    xmm_registers: [Register; 4],
 
     stack_buffer_ptr: *const MaybeUninit<u8>,
     stack_buffer_len: usize,

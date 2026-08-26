@@ -2,6 +2,7 @@
 
 mod asm;
 mod sysv;
+mod win64;
 
 use core::mem::MaybeUninit;
 

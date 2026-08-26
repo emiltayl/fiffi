@@ -32,6 +32,7 @@ ABIs on common platforms, and then branch out from there as needed.
 
 # Work log
 
+* 2026-08-26 Created marshalling plan for Win64 function calls.
 * 2026-08-23 Copied SysV code for Win64 ABI module, started preparing for Win64 function call
   support.
 * 2026-08-23 x86_64 SysV function call support.
