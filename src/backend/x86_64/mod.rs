@@ -12,6 +12,7 @@ use crate::types::Type;
 
 /// ABI constants for 64-bit x86 targets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum Abi {
     #[cfg_attr(not(windows), default)]
     SysV,

@@ -63,6 +63,7 @@ pub(crate) mod internal {
 
 /// A type description used to describe a function's arguments and return types.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Type {
     /// Signed 8-bit integer
     I8,
@@ -134,6 +135,7 @@ pub enum Type {
 /// `VariadicType` can be converted to a [`Type`] using [`VariadicType::to_type`] or [`Type`]'s
 /// `From<VariadicType>` implementation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum VariadicType {
     /// Signed 32-bit integer
     I32,
