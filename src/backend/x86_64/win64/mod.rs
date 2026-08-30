@@ -1,7 +1,7 @@
 //! TODO Top-level documentation with information about how ABI works and assumptions (such as stack
 //! should start aligned to 16 bytes).
 
-// mod call; TODO remove comment when implemented
+mod call;
 mod classification;
 mod plan;
 
@@ -32,6 +32,6 @@ impl CallInterface {
     pub(super) unsafe fn call(&self, fn_ptr: FnPtr, args: &[Arg<'_>], ret: Ret<'_>) {
         // SAFETY: This method has the same safety contract as `call::call` and forwards the marshal
         // plan that was created for this interface's signature.
-        //unsafe { call::call(&self.marshal_plan, fn_ptr, args, ret) }; TODO remove comment when implemented
+        unsafe { call::call(&self.marshal_plan, fn_ptr, args, ret) }
     }
 }

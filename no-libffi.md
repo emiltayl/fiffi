@@ -16,22 +16,23 @@ ABIs on common platforms, and then branch out from there as needed.
   * [x] Argument, return value classification
   * [x] Plan for marshalling arguments
   * [x] Assembly: argument marshalling, the call and return value handling
+* [x] 64-bit x86 Win64 ABI for function calls
+* [ ] Clean up x86_64 backend code and comments
 * [ ] Support discarding return value, add tests for this
-* [ ] Take args by reference in `Function::call`
 * [ ] Review test suite for missing test cases
 * [ ] Plan how to handle overflow in size calculations, document it explicitly
   * [ ] Types
   * [ ] Marshalling plan (stack buffer)
   * [ ] Anything else?
-* [ ] 64-bit x86 Win64 ABI for function calls
+* [ ] Variadic test suite (in C?) and support for variadics
 * [ ] 32-bit x86 ABIs for function calls
 * [ ] Aarch64 ABIs for function calls
 * [ ] Review status
-* [ ] Variadic test suite (in C?) and support for variadics
 * [ ] Closures?
 
 # Work log
 
+* 2026-08-30 Win64 function call support.
 * 2026-08-26 Created marshalling plan for Win64 function calls.
 * 2026-08-23 Copied SysV code for Win64 ABI module, started preparing for Win64 function call
   support.

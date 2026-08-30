@@ -4,12 +4,20 @@ use alloc::vec::Vec;
 use core::mem::size_of;
 
 use super::classification::ValueClass;
-use crate::types::{FfiTypeLayout, Type};
+use crate::types::Type;
+
+const STACK_ARGUMENT_SLOT_SIZE: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct MarshalPlan {
     /// Where to put arguments to prepare for a function call.
     pub(super) argument_moves: Vec<ArgumentMove>,
+
+    /// Bit mask identifying GPR slots containing offsets from the outgoing stack-buffer base.
+    pub(super) gpr_indirect_regs_mask: u8,
+
+    /// Stack-buffer offsets containing pointers that must be based on the outgoing stack address.
+    pub(super) stack_indirect_arguments_offsets: Vec<usize>,
 
     /// The size of the buffer containing arguments passed on the stack.
     pub(super) stack_buffer_size: usize,
@@ -30,13 +38,26 @@ impl MarshalPlan {
             register_allocator.allocate();
         }
 
-        let mut stack_buffer_size = 0;
-        let mut argument_assignments = Vec::with_capacity(argument_types.len());
+        // Every Win64 argument consumes one positional slot. Calculate the stack space required for
+        // argument slots so space required for indirect arguments can be calculated with only one
+        // loop.
+        let stack_argument_buffer_size = argument_types
+            .len()
+            .saturating_sub(register_allocator.available_slots())
+            .checked_mul(STACK_ARGUMENT_SLOT_SIZE)
+            .expect("stack argument buffer size overflow");
 
-        // First assign every argument's destinations. Copy storage is allocated in a second pass so
-        // all actual stack argument slots remain at the start of the stack buffer.
+        let mut next_stack_argument_offset = 0;
+        let mut stack_buffer_size = stack_argument_buffer_size;
+
+        let mut argument_moves = Vec::with_capacity(argument_types.len());
+        // Bit flag with one bit for each argument register, set to 1 if the register contains an
+        // offset to rsp that must be calculated to correctly pass indirect arguments.
+        let mut gpr_indirect_regs_mask = 0;
+        let mut stack_indirect_arguments_offsets = Vec::new();
+
         for (argument_index, argument) in argument_types.iter().enumerate() {
-            let argument_layout = argument.layout();
+            let argument_size = argument.layout().size;
             let argument_class = ValueClass::classify(argument);
 
             let destination = match register_allocator.allocate() {
@@ -45,72 +66,68 @@ impl MarshalPlan {
                 }
                 Some(slot_index) => ArgumentDestination::Gpr(slot_index),
                 None => {
-                    let destination = ArgumentDestination::Stack(stack_buffer_size);
-                    stack_buffer_size += 8;
+                    let destination = ArgumentDestination::Stack(next_stack_argument_offset);
+                    next_stack_argument_offset += STACK_ARGUMENT_SLOT_SIZE;
                     destination
                 }
             };
 
-            argument_assignments.push(ArgumentAssignment {
-                argument_index,
-                layout: argument_layout,
-                class: argument_class,
-                destination,
-            });
-        }
+            let argument_source = ArgumentSource::Argument { argument_index };
 
-        let mut argument_moves = Vec::with_capacity(argument_assignments.len());
-
-        for argument in argument_assignments {
-            let argument_source = ArgumentSource::Argument {
-                argument_index: argument.argument_index,
-            };
-
-            if argument.class == ValueClass::Indirect {
+            if argument_class == ValueClass::Indirect {
                 // Win64 requires caller-owned copies of indirect arguments to be 16-byte aligned.
-                // The stack buffer itself starts at a 16-byte-aligned address in the call trampoline.
-                // Note that the following line will need to be changed if types that are aligned to
-                // more than 16 bytes are added to fiffi.
+                // The stack buffer itself starts at a 16-byte-aligned address in the call
+                // trampoline. Note that the following line will need to be changed if types that
+                // are aligned to more than 16 bytes are added to fiffi.
                 stack_buffer_size = stack_buffer_size.next_multiple_of(16);
                 let argument_copy_offset = stack_buffer_size;
 
                 argument_moves.push(ArgumentMove {
                     source: argument_source,
-                    size: argument.layout.size,
+                    size: argument_size,
                     destination: ArgumentDestination::Stack(argument_copy_offset),
                 });
+
+                match &destination {
+                    ArgumentDestination::Gpr(index) => {
+                        gpr_indirect_regs_mask |= 1 << *index;
+                    }
+                    ArgumentDestination::Stack(offset) => {
+                        stack_indirect_arguments_offsets.push(*offset);
+                    }
+                    ArgumentDestination::Xmm(_) => {
+                        unreachable!("indirect arguments are not passed in vector registers");
+                    }
+                }
+
                 argument_moves.push(ArgumentMove {
                     source: ArgumentSource::StackAddress {
                         offset: argument_copy_offset,
                     },
                     size: size_of::<usize>(),
-                    destination: argument.destination,
+                    destination,
                 });
 
-                stack_buffer_size += argument.layout.size;
+                stack_buffer_size += argument_size;
             } else {
                 argument_moves.push(ArgumentMove {
                     source: argument_source,
-                    size: argument.layout.size,
-                    destination: argument.destination,
+                    size: argument_size,
+                    destination,
                 });
             }
         }
 
+        debug_assert_eq!(next_stack_argument_offset, stack_argument_buffer_size);
+
         Self {
             argument_moves,
+            gpr_indirect_regs_mask,
+            stack_indirect_arguments_offsets,
             stack_buffer_size,
             return_strategy,
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ArgumentAssignment {
-    argument_index: usize,
-    layout: FfiTypeLayout,
-    class: ValueClass,
-    destination: ArgumentDestination,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -173,14 +190,10 @@ pub(super) enum ReturnStrategy {
     HiddenPointer,
 
     /// The function provides its return value in the `byte_length` first bytes of rax.
-    Rax {
-        byte_length: u8,
-    },
+    Rax { byte_length: u8 },
 
     /// The function provides its return value in the `byte_length` first bytes of xmm0.
-    Xmm0 {
-        byte_length: u8,
-    },
+    Xmm0 { byte_length: u8 },
 }
 
 impl ReturnStrategy {
@@ -217,6 +230,10 @@ struct RegisterSlotAllocator {
 impl RegisterSlotAllocator {
     const REGISTER_SLOTS: usize = 4;
 
+    fn available_slots(&self) -> usize {
+        Self::REGISTER_SLOTS - self.next_slot
+    }
+
     fn allocate(&mut self) -> Option<usize> {
         if !self.is_slot_available() {
             return None;
@@ -244,9 +261,7 @@ mod tests {
     use crate::types::FfiType;
 
     fn argument(argument_index: usize) -> ArgumentSource {
-        ArgumentSource::Argument {
-            argument_index,
-        }
+        ArgumentSource::Argument { argument_index }
     }
 
     fn argument_move(
@@ -286,6 +301,8 @@ mod tests {
                     argument_move(3, 4, ArgumentDestination::Xmm(3)),
                     argument_move(4, 8, ArgumentDestination::Stack(0)),
                 ],
+                gpr_indirect_regs_mask: 0,
+                stack_indirect_arguments_offsets: alloc::vec![],
                 stack_buffer_size: 8,
                 return_strategy: ReturnStrategy::Void,
             }
@@ -309,6 +326,8 @@ mod tests {
                     argument_move(2, 8, ArgumentDestination::Gpr(3)),
                     argument_move(3, 4, ArgumentDestination::Stack(0)),
                 ],
+                gpr_indirect_regs_mask: 0,
+                stack_indirect_arguments_offsets: alloc::vec![],
                 stack_buffer_size: 8,
                 return_strategy: ReturnStrategy::HiddenPointer,
             }
@@ -340,6 +359,8 @@ mod tests {
                     argument_move(4, 16, ArgumentDestination::Stack(32)),
                     address_move(32, ArgumentDestination::Stack(0)),
                 ],
+                gpr_indirect_regs_mask: 0b0001,
+                stack_indirect_arguments_offsets: alloc::vec![0],
                 stack_buffer_size: 48,
                 return_strategy: ReturnStrategy::Void,
             }
@@ -357,6 +378,8 @@ mod tests {
                     argument_move(0, 16, ArgumentDestination::Stack(0)),
                     address_move(0, ArgumentDestination::Gpr(0)),
                 ],
+                gpr_indirect_regs_mask: 0b0001,
+                stack_indirect_arguments_offsets: alloc::vec![],
                 stack_buffer_size: 16,
                 return_strategy: ReturnStrategy::Xmm0 { byte_length: 16 },
             }

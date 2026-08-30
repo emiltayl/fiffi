@@ -1,13 +1,13 @@
 extern crate alloc;
 
 use alloc::vec;
-use core::mem::{MaybeUninit, offset_of, size_of};
+use core::mem::{MaybeUninit, offset_of};
 use core::ptr;
 
 use super::plan::{ArgumentDestination, ArgumentMove, MarshalPlan, RegisterBank, ReturnStrategy};
 use crate::FnPtr;
 use crate::backend::x86_64::Register;
-use crate::backend::x86_64::asm::trampoline_asm_with_unwind_frame;
+use crate::backend::x86_64::asm::stack_setup_asm;
 use crate::function::{Arg, Ret};
 
 #[derive(Debug)]
@@ -31,8 +31,8 @@ impl CallFrame {
     ///
     /// `marshal_plan`, `args`, and `ret` must describe the same function signature. Every argument
     /// referenced by the plan must be readable for its declared layout, and the argument storage
-    /// must not overlap `stack_buffer`. The arguments, return storage, and stack buffer must remain
-    /// alive while the returned frame is used.
+    /// must not overlap `stack_buffer`. The return storage, and stack buffer must remain alive
+    /// while the returned frame is used.
     unsafe fn new(
         marshal_plan: &MarshalPlan,
         fn_ptr: FnPtr,
@@ -58,7 +58,7 @@ impl CallFrame {
         }
 
         for step in &marshal_plan.argument_moves {
-            let dst = move_destination(&mut call_frame, stack_buffer, step);
+            let dst = copy_destination(&mut call_frame, stack_buffer, step);
             let arg = args
                 .get(step.argument_index)
                 .expect("marshal plan references an argument that was not provided");
@@ -84,7 +84,7 @@ impl CallFrame {
 /// Returns the exact destination range for an argument move.
 ///
 /// A malformed internal marshal plan panics here before any unchecked pointer operation occurs.
-fn move_destination<'frame>(
+fn copy_destination<'frame>(
     call_frame: &'frame mut CallFrame,
     stack_buffer: &'frame mut [MaybeUninit<u8>],
     step: &ArgumentMove,
@@ -185,7 +185,7 @@ pub(super) unsafe fn call(marshal_plan: &MarshalPlan, fn_ptr: FnPtr, args: &[Arg
     // SAFETY: `call_frame` and its backing `stack_buffer` remain alive for the duration of the
     // invocation. `CallFrame::new` populated them according to `marshal_plan`, and this function's
     // contract guarantees that the plan matches `fn_ptr`, the arguments, and the return storage.
-    // The trampoline macro supplies the platform-specific unwind metadata required by `invoke`.
+    // The assembly supplies the platform-specific unwind metadata required by `invoke`.
     unsafe {
         invoke(&raw mut call_frame);
     }
@@ -208,53 +208,99 @@ pub(super) unsafe fn call(marshal_plan: &MarshalPlan, fn_ptr: FnPtr, args: &[Arg
 /// valid for the signature. The assembly implementation must also provide correct unwind metadata.
 #[unsafe(naked)]
 unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
-    trampoline_asm_with_unwind_frame!(
-        function = invoke,
-        call_frame_register = rdi,
-        stack_buffer_len_offset = offset_of!(CallFrame, stack_buffer_len),
-        stack_argument_area_offset = 0,
-        instructions = [
-            // Copy the stack arguments into the probed allocation.
-            "mov rsi, [r12 + {stack_buffer_ptr_offset}]",
-            "mov rcx, [r12 + {stack_buffer_len_offset}]",
-            "mov rdi, r10",
-            "rep movsb",
+    core::arch::naked_asm!(
+        #[cfg(not(windows))]
+        ".cfi_startproc",
+        #[cfg(windows)]
+        ".seh_proc {__unwind_function}",
 
-            // Set up register arguments.
-            "mov rdi, [r12 + {gpr_registers_offset} + {register_size} * 0]",
-            "mov rsi, [r12 + {gpr_registers_offset} + {register_size} * 1]",
-            "mov rdx, [r12 + {gpr_registers_offset} + {register_size} * 2]",
-            "mov rcx, [r12 + {gpr_registers_offset} + {register_size} * 3]",
-            "mov r8, [r12 + {gpr_registers_offset} + {register_size} * 4]",
-            "mov r9, [r12 + {gpr_registers_offset} + {register_size} * 5]",
+        // Save the caller's frame pointer, then use `rbp` as a stable reference to this frame.
+        // This lets the body move `rsp` while still giving the unwinder a fixed way to find the
+        // caller's stack pointer. The `call_frame` pointer is stored in `r12`.
+        "push rbp",
+        #[cfg(not(windows))]
+        ".cfi_adjust_cfa_offset 8",
+        #[cfg(not(windows))]
+        ".cfi_offset rbp, -16",
+        #[cfg(windows)]
+        ".seh_pushreg rbp",
+        "push r12",
+        #[cfg(not(windows))]
+        ".cfi_adjust_cfa_offset 8",
+        #[cfg(not(windows))]
+        ".cfi_offset r12, -24",
+        #[cfg(windows)]
+        ".seh_pushreg r12",
+        "mov rbp, rsp",
+        #[cfg(not(windows))]
+        ".cfi_def_cfa_register rbp",
+        #[cfg(windows)]
+        ".seh_setframe rbp, 0",
+        #[cfg(windows)]
+        ".seh_endprologue",
 
-            "movq xmm0, [r12 + {xmm_registers_offset} + {register_size} * 0]",
-            "movq xmm1, [r12 + {xmm_registers_offset} + {register_size} * 1]",
-            "movq xmm2, [r12 + {xmm_registers_offset} + {register_size} * 2]",
-            "movq xmm3, [r12 + {xmm_registers_offset} + {register_size} * 3]",
-            "movq xmm4, [r12 + {xmm_registers_offset} + {register_size} * 4]",
-            "movq xmm5, [r12 + {xmm_registers_offset} + {register_size} * 5]",
-            "movq xmm6, [r12 + {xmm_registers_offset} + {register_size} * 6]",
-            "movq xmm7, [r12 + {xmm_registers_offset} + {register_size} * 7]",
+        "mov r12, rdi",
+        stack_setup_asm!("[r12 + {stack_buffer_len_offset}]"),
 
-            "mov r11, [r12 + {fn_ptr_offset}]",
-            "call r11",
+        // Copy the stack arguments into the probed allocation.
+        "mov rsi, [r12 + {stack_buffer_ptr_offset}]",
+        "mov rcx, [r12 + {stack_buffer_len_offset}]",
+        "mov rdi, r10",
+        "rep movsb",
 
-            // Save registers used for return values.
-            "mov [r12 + {gpr_registers_offset} + {register_size} * 0], rax",
-            "mov [r12 + {gpr_registers_offset} + {register_size} * 1], rdx",
-            "movq [r12 + {xmm_registers_offset} + {register_size} * 0], xmm0",
-            "movq [r12 + {xmm_registers_offset} + {register_size} * 1], xmm1",
-        ],
-        operands = [
-            stack_buffer_ptr_offset = const offset_of!(CallFrame, stack_buffer_ptr),
+        // Set up register arguments.
+        "mov rdi, [r12 + {gpr_registers_offset} + {register_size} * 0]",
+        "mov rsi, [r12 + {gpr_registers_offset} + {register_size} * 1]",
+        "mov rdx, [r12 + {gpr_registers_offset} + {register_size} * 2]",
+        "mov rcx, [r12 + {gpr_registers_offset} + {register_size} * 3]",
+        "mov r8, [r12 + {gpr_registers_offset} + {register_size} * 4]",
+        "mov r9, [r12 + {gpr_registers_offset} + {register_size} * 5]",
 
-            gpr_registers_offset = const offset_of!(CallFrame, gpr_registers),
-            xmm_registers_offset = const offset_of!(CallFrame, xmm_registers),
-            register_size = const size_of::<Register>(),
+        "movq xmm0, [r12 + {xmm_registers_offset} + {register_size} * 0]",
+        "movq xmm1, [r12 + {xmm_registers_offset} + {register_size} * 1]",
+        "movq xmm2, [r12 + {xmm_registers_offset} + {register_size} * 2]",
+        "movq xmm3, [r12 + {xmm_registers_offset} + {register_size} * 3]",
+        "movq xmm4, [r12 + {xmm_registers_offset} + {register_size} * 4]",
+        "movq xmm5, [r12 + {xmm_registers_offset} + {register_size} * 5]",
+        "movq xmm6, [r12 + {xmm_registers_offset} + {register_size} * 6]",
+        "movq xmm7, [r12 + {xmm_registers_offset} + {register_size} * 7]",
 
-            fn_ptr_offset = const offset_of!(CallFrame, fn_ptr),
-        ],
+        "mov r11, [r12 + {fn_ptr_offset}]",
+        "call r11",
+
+        // Save registers used for return values.
+        "mov [r12 + {gpr_registers_offset} + {register_size} * 0], rax",
+        "mov [r12 + {gpr_registers_offset} + {register_size} * 1], rdx",
+        "movq [r12 + {xmm_registers_offset} + {register_size} * 0], xmm0",
+        "movq [r12 + {xmm_registers_offset} + {register_size} * 1], xmm1",
+
+        // Restore the stack in one operation so this remains correct after runtime-sized stack
+        // allocations. `lea` also gives the Windows unwinder a recognized frame-pointer-based
+        // epilogue.
+        "lea rsp, [rbp]",
+        "pop r12",
+        #[cfg(not(windows))]
+        ".cfi_restore r12",
+        "pop rbp",
+        #[cfg(not(windows))]
+        ".cfi_def_cfa rsp, 8",
+        "ret",
+
+        #[cfg(not(windows))]
+        ".cfi_endproc",
+        #[cfg(windows)]
+        ".seh_endproc",
+        #[cfg(windows)]
+        __unwind_function = sym invoke,
+        __stack_probe_interval = const crate::backend::x86_64::asm::STACK_PROBE_INTERVAL,
+        stack_buffer_len_offset = const offset_of!(CallFrame, stack_buffer_len),
+        stack_buffer_ptr_offset = const offset_of!(CallFrame, stack_buffer_ptr),
+
+        gpr_registers_offset = const offset_of!(CallFrame, gpr_registers),
+        xmm_registers_offset = const offset_of!(CallFrame, xmm_registers),
+        register_size = const size_of::<Register>(),
+
+        fn_ptr_offset = const offset_of!(CallFrame, fn_ptr),
     );
 }
 #[cfg(test)]
@@ -596,6 +642,6 @@ mod tests {
             destination: ArgumentDestination::Gpr(0),
         };
 
-        let _ = move_destination(&mut call_frame, &mut stack_buffer, &invalid_move);
+        let _ = copy_destination(&mut call_frame, &mut stack_buffer, &invalid_move);
     }
 }

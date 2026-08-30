@@ -29,13 +29,14 @@ impl Abi {
 #[derive(Clone, Debug)]
 pub(crate) enum CallInterface {
     SysV(sysv::CallInterface),
+    Win64(win64::CallInterface),
 }
 
 impl CallInterface {
     pub(crate) fn new(argument_types: &[Type], return_type: Option<&Type>, abi: Abi) -> Self {
         match abi {
             Abi::SysV => Self::SysV(sysv::CallInterface::new(argument_types, return_type)),
-            Abi::Win64 => todo!(),
+            Abi::Win64 => Self::Win64(win64::CallInterface::new(argument_types, return_type)),
         }
     }
 
@@ -47,11 +48,17 @@ impl CallInterface {
     /// and `ret` must match the signature used to create this interface.
     pub(crate) unsafe fn call(&self, fn_ptr: FnPtr, args: &[Arg<'_>], ret: Ret<'_>) {
         match self {
-            Self::SysV(call_interface) => {
-                // SAFETY: This method has the same safety contract as the ABI-specific call method
-                // and forwards the function pointer, arguments, and return storage unchanged.
-                unsafe { call_interface.call(fn_ptr, args, ret) };
-            }
+            // SAFETY: This method has the same safety contract as the ABI-specific call method
+            // and forwards the function pointer, arguments, and return storage unchanged.
+            Self::SysV(call_interface) => unsafe {
+                call_interface.call(fn_ptr, args, ret);
+            },
+
+            // SAFETY: This method has the same safety contract as the ABI-specific call method
+            // and forwards the function pointer, arguments, and return storage unchanged.
+            Self::Win64(call_interface) => unsafe {
+                call_interface.call(fn_ptr, args, ret);
+            },
         }
     }
 }
