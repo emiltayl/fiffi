@@ -4,14 +4,11 @@ use alloc::vec;
 use core::mem::{MaybeUninit, offset_of};
 use core::ptr;
 
-use super::plan::{ArgumentDestination, ArgumentMove, ArgumentSource, MarshalPlan, ReturnStrategy};
+use super::plan::{ArgumentDestination, ArgumentSource, MarshalPlan, ReturnStrategy};
 use crate::FnPtr;
 use crate::backend::x86_64::Register;
 use crate::backend::x86_64::asm::stack_setup_asm;
 use crate::function::{Arg, Ret};
-
-// TODO Fix assembly for Win64. Note that 32 bytes need to be reserved on the stack prior to any
-// `call`.
 
 #[derive(Debug)]
 struct CallFrame {
@@ -24,8 +21,7 @@ struct CallFrame {
 
     /// Bit mask identifying GPR slots containing offsets from the outgoing stack-buffer base.
     gpr_indirect_regs_mask: u8,
-    /// Plan-owned list of stack-buffer offsets containing pointers that need the outgoing stack
-    /// address added to them.
+    /// Plan-owned offsets of stack slots rebased onto the outgoing stack buffer.
     stack_indirect_arguments_offsets_ptr: *const usize,
     stack_indirect_arguments_offsets_len: usize,
 
@@ -39,10 +35,10 @@ impl CallFrame {
     ///
     /// # Safety
     ///
-    /// `marshal_plan`, `args`, and `ret` must describe the same function signature. Every argument
-    /// referenced by the plan must be readable for its declared layout, and the argument storage
-    /// must not overlap `stack_buffer`. The marshal plan, return storage, and stack buffer must
-    /// remain alive while the returned frame is used.
+    /// * `marshal_plan`, `args`, and `ret` must describe the same signature.
+    /// * Arguments must be readable for their layouts and must not overlap `stack_buffer`.
+    /// * `stack_buffer` must have the planned size.
+    /// * The plan, return storage, and stack buffer must outlive use of the frame.
     unsafe fn new(
         marshal_plan: &MarshalPlan,
         fn_ptr: FnPtr,
@@ -50,8 +46,6 @@ impl CallFrame {
         ret: &Ret<'_>,
         stack_buffer: &mut [MaybeUninit<u8>],
     ) -> Self {
-        assert_eq!(stack_buffer.len(), marshal_plan.stack_buffer_size);
-
         let mut call_frame = Self {
             gpr_registers: <[Register; 4] as Default>::default(),
             xmm_registers: <[Register; 4] as Default>::default(),
@@ -62,31 +56,37 @@ impl CallFrame {
             stack_indirect_arguments_offsets_len: marshal_plan
                 .stack_indirect_arguments_offsets
                 .len(),
-            stack_buffer_ptr: stack_buffer.as_ptr(),
+            stack_buffer_ptr: ptr::null(),
             stack_buffer_len: stack_buffer.len(),
             fn_ptr,
         };
 
-        // If the return value is passed through a "hidden" pointer, we can simply pass along the
-        // `ret` pointer as the first argument
+        // A hidden return pointer occupies the first argument slot.
         if marshal_plan.return_strategy == ReturnStrategy::HiddenPointer {
             let ret_ptr_bytes = ret.as_ptr().expose_provenance().to_ne_bytes();
             call_frame.gpr_registers[0].update_from_bytes(&ret_ptr_bytes);
         }
 
         for step in &marshal_plan.argument_moves {
+            let destination = match &step.destination {
+                ArgumentDestination::Gpr(index) => {
+                    &mut call_frame.gpr_registers[*index].0[..step.size]
+                }
+                ArgumentDestination::Xmm(index) => {
+                    &mut call_frame.xmm_registers[*index].0[..step.size]
+                }
+                ArgumentDestination::Stack(offset) => {
+                    &mut stack_buffer[*offset..(*offset + step.size)]
+                }
+            };
             match &step.source {
                 ArgumentSource::Argument { argument_index } => {
-                    let arg = args
-                        .get(*argument_index)
-                        .expect("marshal plan references an argument that was not provided");
-                    let destination = copy_destination(&mut call_frame, stack_buffer, step);
+                    let arg = &args[*argument_index];
 
-                    // SAFETY: The caller guarantees that `arg` is readable for the layout used to
-                    // build `marshal_plan`. `destination` is a bounds-checked slice of exactly
-                    // `step.size` bytes in fresh call-owned storage, which the safety contract
-                    // requires not to overlap the argument storage. Copying as `MaybeUninit<u8>`
-                    // permits argument padding bytes to remain uninitialized.
+                    // SAFETY:
+                    // * The caller provides readable argument storage of the planned size.
+                    // * The destination is in bounds and does not overlap the argument.
+                    // * `MaybeUninit<u8>` permits uninitialized padding.
                     unsafe {
                         ptr::copy_nonoverlapping(
                             arg.as_ptr().cast::<MaybeUninit<u8>>(),
@@ -96,7 +96,6 @@ impl CallFrame {
                     }
                 }
                 ArgumentSource::StackAddress { offset } => {
-                    let destination = copy_destination(&mut call_frame, stack_buffer, step);
                     let offset_bytes = offset.to_ne_bytes();
                     for (destination_byte, offset_byte) in destination.iter_mut().zip(offset_bytes)
                     {
@@ -106,75 +105,40 @@ impl CallFrame {
             }
         }
 
+        // Derive the shared pointer after the final mutable borrow of the buffer.
+        call_frame.stack_buffer_ptr = stack_buffer.as_ptr();
         call_frame
-    }
-}
-
-fn copy_destination<'frame>(
-    call_frame: &'frame mut CallFrame,
-    stack_buffer: &'frame mut [MaybeUninit<u8>],
-    step: &ArgumentMove,
-) -> &'frame mut [MaybeUninit<u8>] {
-    match &step.destination {
-        ArgumentDestination::Gpr(index) => call_frame
-            .gpr_registers
-            .get_mut(*index)
-            .and_then(|register| register.0.get_mut(..step.size))
-            .expect("marshal plan contains an invalid general-purpose register destination"),
-        ArgumentDestination::Xmm(index) => call_frame
-            .xmm_registers
-            .get_mut(*index)
-            .and_then(|register| register.0.get_mut(..step.size))
-            .expect("marshal plan contains an invalid vector register destination"),
-        ArgumentDestination::Stack(offset) => stack_buffer
-            .get_mut(*offset..(*offset + step.size))
-            .expect("marshal plan contains an invalid stack destination"),
     }
 }
 
 /// Writes a register-returned value from a call frame into caller-provided storage.
 ///
-/// The first two entries in each register bank are reused for the corresponding ABI return
-/// registers: `rax` and `rdx` for the general-purpose bank and `xmm0` and `xmm1` for the vector
-/// bank.
-///
 /// # Safety
 ///
-/// The registers selected by `return_strategy` must contain the return value described by the
-/// strategy. For register returns, `ret` must point to writable storage large enough for the
-/// described value, and that storage must not overlap `call_frame`.
+/// * The selected bytes must be in bounds and contain the described return value.
+/// * For register returns, `ret` must be writable for that value and not overlap the frame.
 unsafe fn write_register_return(
     call_frame: &CallFrame,
     return_strategy: ReturnStrategy,
     ret: Ret<'_>,
 ) {
-    match return_strategy {
-        ReturnStrategy::Void | ReturnStrategy::HiddenPointer => {}
+    let (source, byte_length) = match return_strategy {
+        ReturnStrategy::Void | ReturnStrategy::HiddenPointer => return,
+        ReturnStrategy::Rax { byte_length } => {
+            (call_frame.gpr_registers[0].0.as_ptr(), byte_length)
+        }
+        ReturnStrategy::Xmm0 { byte_length } => {
+            // Borrow the whole bank: a full `xmm0` return spans two eight-byte slots.
+            (call_frame.xmm_registers.as_ptr().cast(), byte_length)
+        }
+    };
 
-        // SAFETY: The caller guarantees that `ret` is valid for writes of `byte_length` bytes and
-        // does not overlap `call_frame`. The given `ReturnStrategy` guarantees that the register
-        // has been filled with `byte_length` bytes containing the result.
-        ReturnStrategy::Rax { byte_length } => unsafe {
-            ptr::copy_nonoverlapping(
-                call_frame.gpr_registers[0].0.as_ptr(),
-                ret.as_ptr().cast(),
-                usize::from(byte_length),
-            );
-        },
-
-        // SAFETY: The caller guarantees that `ret` is valid for writes of `byte_length` bytes and
-        // does not overlap `call_frame`. The given `ReturnStrategy` guarantees that the register
-        // has been filled with `byte_length` bytes containing the result. Certain return values are
-        // returned in the full xmm0 register, which will be written to the two first `Register`s in
-        // `call_frame.xmm_registers`. Reading 16 successive bytes is valid as they are adjacent in
-        // memory and part of the same allocation.
-        ReturnStrategy::Xmm0 { byte_length } => unsafe {
-            ptr::copy_nonoverlapping(
-                call_frame.xmm_registers[0].0.as_ptr(),
-                ret.as_ptr().cast(),
-                usize::from(byte_length),
-            );
-        },
+    // SAFETY:
+    // * The selected bytes contain the return value.
+    // * The caller provides enough writable, nonoverlapping return storage.
+    // * `MaybeUninit<u8>` permits uninitialized padding.
+    unsafe {
+        ptr::copy_nonoverlapping(source, ret.as_ptr().cast(), usize::from(byte_length));
     }
 }
 
@@ -182,26 +146,28 @@ unsafe fn write_register_return(
 ///
 /// # Safety
 ///
-/// The safety contract of [`crate::function::Function::call`] must be upheld. `marshal_plan` must
-/// have been built for the exact signature described by `fn_ptr`, `args`, and `ret`.
-pub(super) unsafe fn call(marshal_plan: &MarshalPlan, fn_ptr: FnPtr, args: &[Arg], ret: Ret) {
+/// * Uphold [`crate::function::Function::call`]'s safety contract.
+/// * `marshal_plan` must describe `fn_ptr`, `args`, and `ret`.
+pub(crate) unsafe fn call(marshal_plan: &MarshalPlan, fn_ptr: FnPtr, args: &[Arg], ret: Ret) {
     let mut stack_buffer = vec![MaybeUninit::<u8>::uninit(); marshal_plan.stack_buffer_size];
 
-    // SAFETY: The caller upholds this function's contract. `stack_buffer` is freshly allocated at
-    // the size required by `marshal_plan`, so it cannot overlap the live caller-owned arguments.
+    // SAFETY:
+    // * The caller provides arguments and return storage matching the plan.
+    // * The fresh stack buffer has the planned size and cannot overlap the arguments.
     let mut call_frame =
         unsafe { CallFrame::new(marshal_plan, fn_ptr, args, &ret, &mut stack_buffer) };
 
-    // SAFETY: `call_frame` and its backing `stack_buffer` remain alive for the duration of the
-    // invocation. `CallFrame::new` populated them according to `marshal_plan`, and this function's
-    // contract guarantees that the plan matches `fn_ptr`, the arguments, and the return storage.
-    // The assembly supplies the platform-specific unwind metadata required by `invoke`.
+    // SAFETY:
+    // * The frame, buffer, plan, and return storage remain alive during the call.
+    // * The frame contains arguments matching the target signature.
+    // * The caller provides valid return storage.
     unsafe {
         invoke(&raw mut call_frame);
     }
 
-    // SAFETY: The caller guarantees that `ret` is valid for the planned return type. `invoke`
-    // writes register-returned values into the corresponding register slots in `call_frame`.
+    // SAFETY:
+    // * `invoke` stored the returned registers in the frame.
+    // * The caller provides valid return storage, separate from the frame.
     unsafe {
         write_register_return(&call_frame, marshal_plan.return_strategy, ret);
     }
@@ -211,12 +177,10 @@ pub(super) unsafe fn call(marshal_plan: &MarshalPlan, fn_ptr: FnPtr, args: &[Arg
 ///
 /// # Safety
 ///
-/// `call_frame` must point to a valid [`CallFrame`] that remains alive for the duration of the
-/// invocation, along with the stack buffer and marshal-plan metadata referenced by the frame. Its
-/// function pointer must be callable with the ABI arguments represented by the frame, and every
-/// register or stack byte read by the called function must contain the corresponding argument
-/// data. Any return storage must be valid for the signature. The assembly implementation must also
-/// provide correct unwind metadata.
+/// * The frame must remain writable for the call.
+/// * Its stack buffer and plan metadata must remain readable for the call.
+/// * The target must accept the ABI arguments stored in the frame.
+/// * Any return storage must be valid for the signature.
 #[unsafe(naked)]
 unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
     core::arch::naked_asm!(
@@ -225,9 +189,7 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
         #[cfg(windows)]
         ".seh_proc {__unwind_function}",
 
-        // Save the caller's frame pointer, then preserve the other nonvolatile registers used by
-        // this function in the first three slots of the caller-provided shadow space. After the
-        // `rbp` push, those slots are at `rsp + 16`, `rsp + 24`, and `rsp + 32`.
+        // Establish the frame pointer before recording frame-relative register saves.
         "push rbp",
         #[cfg(not(windows))]
         ".cfi_adjust_cfa_offset 8",
@@ -235,6 +197,13 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
         ".cfi_offset rbp, -16",
         #[cfg(windows)]
         ".seh_pushreg rbp",
+        "mov rbp, rsp",
+        #[cfg(not(windows))]
+        ".cfi_def_cfa_register rbp",
+        #[cfg(windows)]
+        ".seh_setframe rbp, 0",
+
+        // Save nonvolatile registers in the caller's shadow space.
         "mov [rsp + 16], r12",
         #[cfg(not(windows))]
         ".cfi_offset r12, 0",
@@ -250,21 +219,15 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
         ".cfi_offset rsi, 16",
         #[cfg(windows)]
         ".seh_savereg rsi, 32",
-        // Use `rbp` as a stable reference while the body moves `rsp`. The `call_frame` pointer is
-        // stored in `r12`.
-        "mov rbp, rsp",
-        #[cfg(not(windows))]
-        ".cfi_def_cfa_register rbp",
-        #[cfg(windows)]
-        ".seh_setframe rbp, 0",
         #[cfg(windows)]
         ".seh_endprologue",
 
+        // Keep the `CallFrame` pointer in a nonvolatile register across the target call.
         "mov r12, rcx",
         "mov r11, [r12 + {stack_buffer_len_offset}]",
         "add r11, 32",
         stack_setup_asm!("r11"),
-        // Expose the destination for the buffered arguments to the ABI-specific body.
+        // Skip the outgoing shadow space.
         "add r10, 32",
 
         // Copy the stack arguments into the probed allocation.
@@ -284,7 +247,7 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
         "movq xmm2, [r12 + {xmm_registers_offset} + {register_size} * 2]",
         "movq xmm3, [r12 + {xmm_registers_offset} + {register_size} * 3]",
 
-        // Calculate offsets to indirect arguments for register arguments
+        // Rebase indirect register arguments onto the outgoing stack buffer.
         "mov al, [r12 + {gpr_indirect_regs_mask_offset}]",
         "test al, 1 << 0",
         "jz 20f",
@@ -303,7 +266,7 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
         "add r9, r10",
         "23:",
 
-        // Calculate offsets to indirect arguments for stack arguments
+        // Rebase indirect stack arguments onto the outgoing stack buffer.
         "mov rax, [r12 + {stack_indirect_arguments_offset}]",
         "mov r11, [r12 + {stack_indirect_arguments_len}]",
 
@@ -334,9 +297,7 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
         #[cfg(not(windows))]
         ".cfi_restore rsi",
 
-        // Restore the stack in one operation so this remains correct after runtime-sized stack
-        // allocations. `lea` also gives the Windows unwinder a recognized frame-pointer-based
-        // epilogue.
+        // Restore the dynamic stack allocation with a Windows-recognized epilogue.
         "lea rsp, [rbp]",
         "pop rbp",
         #[cfg(not(windows))]
@@ -349,7 +310,6 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
         ".seh_endproc",
         #[cfg(windows)]
         __unwind_function = sym invoke,
-        __stack_probe_interval = const crate::backend::x86_64::asm::STACK_PROBE_INTERVAL,
         stack_buffer_len_offset = const offset_of!(CallFrame, stack_buffer_len),
         stack_buffer_ptr_offset = const offset_of!(CallFrame, stack_buffer_ptr),
 
@@ -367,8 +327,6 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
 
 #[cfg(test)]
 mod tests {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
-
     use super::*;
     use crate::fn_ptrize;
     use crate::test_utils::structs::{U8X3_ARG, U8x3, U64X2_ARG, U64x2, U64x3};
@@ -380,8 +338,7 @@ mod tests {
         assert_eq!(bytes.len(), N);
 
         core::array::from_fn(|index| {
-            // SAFETY: Tests only call this helper for zero-initialized registers or stack-buffer
-            // regions populated by the argument moves under test.
+            // SAFETY: These tests pass only initialized argument or register bytes.
             unsafe { *bytes[index].assume_init_ref() }
         })
     }
@@ -415,8 +372,10 @@ mod tests {
         let ret = Ret::void();
         let mut stack_buffer = vec![MaybeUninit::uninit(); marshal_plan.stack_buffer_size];
 
-        // SAFETY: Every argument matches the corresponding type used to build the plan and cannot
-        // overlap the separately allocated stack buffer. The void return matches the plan.
+        // SAFETY:
+        // * Arguments and the void return match the plan.
+        // * The separate stack buffer has the planned size.
+        // * The plan and buffer outlive the frame.
         let call_frame = unsafe {
             CallFrame::new(
                 &marshal_plan,
@@ -476,8 +435,10 @@ mod tests {
         let ret = Ret::void();
         let mut stack_buffer = vec![MaybeUninit::new(0xa5); marshal_plan.stack_buffer_size];
 
-        // SAFETY: Every argument matches the corresponding type used to build the plan and cannot
-        // overlap the separately allocated stack buffer. The void return matches the plan.
+        // SAFETY:
+        // * Arguments and the void return match the plan.
+        // * The separate stack buffer has the planned size.
+        // * The plan and buffer outlive the frame.
         let call_frame = unsafe {
             CallFrame::new(
                 &marshal_plan,
@@ -532,8 +493,10 @@ mod tests {
         let return_address = ret.as_ptr().expose_provenance();
         let mut stack_buffer = vec![MaybeUninit::uninit(); marshal_plan.stack_buffer_size];
 
-        // SAFETY: Both arguments and the return storage match the types used to build the plan and
-        // cannot overlap the separately allocated stack buffer.
+        // SAFETY:
+        // * Arguments and return storage match the plan.
+        // * The separate stack buffer has the planned size.
+        // * The plan, return storage, and buffer outlive the frame.
         let call_frame = unsafe {
             CallFrame::new(
                 &marshal_plan,

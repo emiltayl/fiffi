@@ -17,6 +17,18 @@ impl Display for EmptyStructError {
 
 impl Error for EmptyStructError {}
 
+/// Error returned when trying to create an empty union type, which is not supported by fiffi.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EmptyUnionError;
+
+impl Display for EmptyUnionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Tried to create a union `Type` without any variants.")
+    }
+}
+
+impl Error for EmptyUnionError {}
+
 /// Error returned when trying to convert a [`Type`] that is not a valid type for variadic arguments
 /// to [`VariadicType`](crate::types::VariadicType).
 ///

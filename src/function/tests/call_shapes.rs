@@ -14,6 +14,45 @@ macro_rules! call_shape_tests_for_abi {
                 U64X3_ARG, U64x3,
             };
 
+            #[test]
+            fn aggregate_spanning_multiple_stack_pages_roundtrips() {
+                use crate::function::{Function, arg, ret};
+                use crate::types::Type;
+
+                const LENGTH: usize = 3 * 4096 + 1;
+
+                #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+                #[repr(C)]
+                struct Large {
+                    bytes: [u8; LENGTH],
+                }
+
+                extern $extern_abi fn transform(marker: usize, mut value: Large) -> Large {
+                    assert_eq!(marker, LENGTH);
+                    for byte in &mut value.bytes {
+                        *byte ^= 0xff;
+                    }
+                    value
+                }
+
+                let ty = Type::create_struct(vec![Type::U8; LENGTH]).unwrap();
+                let function = Function::with_abi(
+                    crate::fn_ptrize!(transform),
+                    &[Type::Usize, ty.clone()],
+                    Some(&ty),
+                    $abi,
+                );
+                let input = Large {
+                    bytes: core::array::from_fn(|index| u8::try_from(index % 251).unwrap()),
+                };
+                let mut output = Large { bytes: [0; LENGTH] };
+
+                // SAFETY: The signature and live argument/return storage match `transform`.
+                unsafe { function.call(&[arg(&LENGTH), arg(&input)], ret(&mut output)); }
+
+                assert_eq!(output.bytes, input.bytes.map(|byte| byte ^ 0xff));
+            }
+
             #[rustfmt::skip]
             #[test]
             fn sixteen_i32_arguments_return_normally() {

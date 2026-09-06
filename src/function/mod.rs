@@ -29,6 +29,7 @@
 
 extern crate alloc;
 
+#[cfg(not(test))]
 use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::marker::PhantomData;
@@ -42,9 +43,8 @@ use crate::{Abi, FnPtr};
 
 /// Reference to an argument to pass to [`Function::call`].
 ///
-/// Note that while `Arg` ensures that arguments are alive when they are passed, `Arg` does not
-/// perform any verification to ensure that the argument is the correct type. It is up to the caller
-/// to ensure that valid arguments are passed to functions.
+/// Keeps the argument alive during the call. The caller must ensure its type matches the function
+/// signature.
 ///
 /// # Example
 ///
@@ -55,7 +55,7 @@ use crate::{Abi, FnPtr};
 /// let arg = Arg::new(&value);
 ///
 /// // `Arg` may also be passed a reference to a slice of memory, but it must be large enough and
-/// // properly aligned. This is not checked by fiffi or libffi.
+/// // properly aligned. This is not checked by fiffi.
 /// let arg_buffer = [0u8; 4];
 /// let arg = Arg::new(&arg_buffer);
 /// ```
@@ -66,16 +66,12 @@ pub struct Arg<'arg>(*mut c_void, PhantomData<&'arg ()>);
 impl<'arg> Arg<'arg> {
     /// Creates an `Arg` from a reference.
     ///
-    /// It is up to the caller to ensure that the reference points to valid data with proper size
-    /// and alignment.
+    /// The value must match the expected argument type when passed to [`Function::call`].
     pub fn new<T>(arg_ref: &'arg T) -> Self
     where
         T: ?Sized,
     {
-        let arg_ptr = ptr::from_ref(arg_ref)
-            .cast::<c_void>()
-            // libffi-sys expects a `*mut c_void`, so we must cast to a `mut` pointer.
-            .cast_mut();
+        let arg_ptr = ptr::from_ref(arg_ref).cast::<c_void>().cast_mut();
 
         Self(arg_ptr, PhantomData)
     }
@@ -97,10 +93,8 @@ where
 
 /// Mutable reference to where the result of [`Function::call`] should be stored.
 ///
-/// For functions that do not return any value, [`Ret::void`] can be used to avoid having to provide
-/// a mutable reference. Note that [`Ret::void`] must only be used with functions that do not return
-/// a value. `Ret` does not perform any validation to ensure that it is valid to write the return
-/// value to the provided mutable reference.
+/// Use [`Ret::void`] for functions with no return value. The caller must ensure the storage is
+/// valid for the return type.
 ///
 /// # Example
 ///
@@ -115,7 +109,7 @@ where
 /// // `value.assume_init()`.
 ///
 /// // `Ret` may also be passed a mutable reference to a slice of memory, but it must be large
-/// // enough and properly aligned. This is not checked by fiffi or libffi.
+/// // enough and properly aligned. This is not checked by fiffi.
 /// let mut ret_buffer = [0u8; 4];
 /// let ret = Ret::new(&mut ret_buffer);
 /// ```
@@ -126,8 +120,7 @@ pub struct Ret<'ret>(*mut c_void, PhantomData<&'ret mut ()>);
 impl<'ret> Ret<'ret> {
     /// Creates a `Ret` from a mutable reference.
     ///
-    /// It is up to the caller to ensure that it is valid to store the result at the referenced
-    /// location.
+    /// The storage must be valid for the return type when passed to [`Function::call`].
     pub fn new<T>(ret_ref: &'ret mut T) -> Self
     where
         T: ?Sized,
@@ -137,10 +130,9 @@ impl<'ret> Ret<'ret> {
         Self(ret_ptr, PhantomData)
     }
 
-    /// Used to create a `Ret` for functions that do not return any value.
+    /// Creates a `Ret` for functions with no return value.
     ///
-    /// Using a `Ret::void()` with a [`Function`] that returns a value will result in a segmentation
-    /// fault as libffi attempts to write the result to a NULL pointer.
+    /// Only use with a [`Function`] created without a return type.
     pub fn void() -> Self {
         Self(null_mut(), PhantomData)
     }
@@ -160,7 +152,7 @@ where
     Ret::new(ret_ref)
 }
 
-/// An callable FFI function.
+/// A callable FFI function.
 ///
 /// `Function` can be used to call FFI functions in cases where the signature is not known at
 /// compile-time.
@@ -196,12 +188,6 @@ pub struct Function {
 
 impl Function {
     /// Create a `Function` using the target's default ABI.
-    ///
-    /// # Warning
-    ///
-    /// libffi stores the number of arguments in a C `unsigned int`. If more than `c_uint::MAX`
-    /// argument types are provided, only the first `c_uint::MAX` are retained in the prepared
-    /// function signature.
     pub fn new(fn_ptr: FnPtr, argument_types: &[Type], return_type: Option<&Type>) -> Self {
         Self::with_abi(fn_ptr, argument_types, return_type, Abi::default())
     }
@@ -210,14 +196,6 @@ impl Function {
     ///
     /// `fixed_argument_types` must describe the fixed parameters, and `variadic_argument_types`
     /// must describe the variadic arguments supplied for a call.
-    ///
-    /// # Warning
-    ///
-    /// libffi stores the number of arguments in a C `unsigned int`. If more than `c_uint::MAX`
-    /// argument types are provided, only the first `c_uint::MAX` are retained in the prepared
-    /// function signature.
-    ///
-    /// Fixed arguments are retained before variadic arguments if the signature is truncated.
     ///
     /// # Example
     ///
@@ -263,7 +241,7 @@ impl Function {
     ///     );
     /// }
     ///
-    /// // `snprintf`'s return value return the written length without the final NULL byte.
+    /// // `snprintf` returns the written length without the final null byte.
     /// assert_eq!(return_value as usize, expected.len() - 1);
     /// assert_eq!(expected, &output_buffer[0..expected.len()]);
     /// ```
@@ -283,12 +261,6 @@ impl Function {
     }
 
     /// Creates a `Function` using the provided [`Abi`].
-    ///
-    /// # Warning
-    ///
-    /// libffi stores the number of arguments in a C `unsigned int`. If more than `c_uint::MAX`
-    /// argument types are provided, only the first `c_uint::MAX` are retained in the prepared
-    /// function signature.
     pub fn with_abi(
         fn_ptr: FnPtr,
         argument_types: &[Type],
@@ -307,14 +279,6 @@ impl Function {
     ///
     /// `fixed_argument_types` must describe the fixed parameters, and `variadic_argument_types`
     /// must describe the variadic arguments supplied for a call.
-    ///
-    /// # Warning
-    ///
-    /// libffi stores the number of arguments in a C `unsigned int`. If more than `c_uint::MAX`
-    /// argument types are provided, only the first `c_uint::MAX` are retained in the prepared
-    /// function signature.
-    ///
-    /// Fixed arguments are retained before variadic arguments if the signature is truncated.
     pub fn variadic_with_abi(
         _fn_ptr: FnPtr,
         _fixed_argument_types: &[Type],
@@ -369,6 +333,7 @@ impl Function {
     /// # Safety
     ///
     /// * The wrapped [`FnPtr`] must be valid to call with this function's ABI and signature.
+    /// * The target function's safety requirements must be upheld.
     /// * Every [`Arg`] in `args` must point to an initialized value matching the corresponding
     ///   [`Type`] the function expects and remain alive for the duration of the call.
     /// * All arguments expected by the called function must be provided.
@@ -399,9 +364,10 @@ impl Function {
     /// assert_eq!(output, 42);
     /// ```
     pub unsafe fn call(&self, args: &[Arg<'_>], ret: Ret) {
-        // SAFETY: The caller must uphold this method's safety contract, which is the same contract
-        // required by `CallInterface::call`.
-        unsafe { self.call_interface.call(self.fn_ptr, args, ret) };
+        // SAFETY: The caller upholds the same contract required by `CallInterface::call`.
+        unsafe {
+            self.call_interface.call(self.fn_ptr, args, ret);
+        }
     }
 
     /// Returns the memory layout of this `Function`'s arguments.
@@ -444,14 +410,6 @@ impl Function {
         todo!();
     }
 }
-
-// SAFETY: `Function` itself is safe to be sent to a different thread, although it should be noted
-// that it might not be safe to call the provided function pointer from another thread.
-unsafe impl Send for Function {}
-
-// SAFETY: `Function` itself is safe to be sent to a different thread, although it should be noted
-// that it might not be safe to call the provided function pointer from another thread.
-unsafe impl Sync for Function {}
 
 /// Builder state used before a function pointer has been set.
 ///
@@ -536,12 +494,6 @@ impl<State> FunctionBuilder<State> {
 
 impl FunctionBuilder<FnPtrSet> {
     /// Build the [`Function`].
-    ///
-    /// # Warning
-    ///
-    /// libffi stores the number of arguments in a C `unsigned int`. If more than `c_uint::MAX`
-    /// argument types are provided, only the first `c_uint::MAX` are retained in the prepared
-    /// function signature.
     pub fn build(self) -> Function {
         Function::with_abi(
             self.fn_ptr.0,
@@ -559,8 +511,6 @@ impl FunctionBuilder<FnPtrSet> {
 ///
 /// Fixed and variadic argument types are appended in call order within their respective groups.
 /// All fixed arguments are always provided before all variadic arguments when calling the function.
-///
-/// If the signature is truncated, fixed arguments are retained before variadic arguments.
 ///
 /// # Example
 ///
@@ -652,12 +602,6 @@ impl<State> VariadicFunctionBuilder<State> {
 
 impl VariadicFunctionBuilder<FnPtrSet> {
     /// Build the variadic [`Function`].
-    ///
-    /// # Warning
-    ///
-    /// libffi stores the number of arguments in a C `unsigned int`. If more than `c_uint::MAX`
-    /// argument types are provided, only the first `c_uint::MAX` are retained in the prepared
-    /// function signature.
     pub fn build(self) -> Function {
         Function::variadic_with_abi(
             self.fn_ptr.0,

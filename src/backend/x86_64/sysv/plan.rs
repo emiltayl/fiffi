@@ -1,16 +1,17 @@
 extern crate alloc;
 
+#[cfg(not(test))]
 use alloc::vec::Vec;
 
 use super::classification::ValueClass;
-use crate::types::{FfiTypeLayout, Type};
+use crate::types::Type;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct MarshalPlan {
-    /// Where to put arguments to prepare for a function call.
+pub(crate) struct MarshalPlan {
+    /// Argument copies and destinations.
     pub(super) argument_moves: Vec<ArgumentMove>,
 
-    /// The size of the buffer containing arguments passed on the stack.
+    /// Stack argument buffer size in bytes.
     pub(super) stack_buffer_size: usize,
 
     /// How the function returns its value.
@@ -18,33 +19,39 @@ pub(super) struct MarshalPlan {
 }
 
 impl MarshalPlan {
-    pub(super) fn build(argument_types: &[Type], return_type: Option<&Type>) -> Self {
+    pub(crate) fn build(argument_types: &[Type], return_type: Option<&Type>) -> Self {
         let mut register_allocator = RegisterAllocator::default();
 
-        let mut argument_moves: Vec<ArgumentMove> = Vec::with_capacity(argument_types.len());
-
+        let mut argument_moves = Vec::with_capacity(argument_types.len());
         let mut stack_buffer_size: usize = 0;
-        let mut stack_arguments: Vec<(usize, FfiTypeLayout)> = Vec::new();
 
         let return_strategy = ReturnStrategy::for_return_type(return_type);
 
-        // Reserve the first argument register for the hidden return pointer if the return type's
-        // strategy is memory. There is always a register available at the start, so we do not need
-        // to check `RegisterAllocator::allocate`'s return value.
+        // Reserve the first GPR for the hidden return pointer if needed.
         if return_strategy == ReturnStrategy::HiddenPointer {
             register_allocator.allocate(RegisterRequirements::One(RegisterBank::Gpr));
         }
 
         for (argument_index, argument) in argument_types.iter().enumerate() {
             let argument_layout = argument.layout();
-
             let argument_class = ValueClass::classify(argument);
 
             let allocation = RegisterRequirements::for_value_class(argument_class)
                 .and_then(|requirements| register_allocator.allocate(requirements));
 
             match allocation {
-                None => stack_arguments.push((argument_index, argument_layout)),
+                None => {
+                    // Stack arguments appear in argument order, starting at a 16-byte boundary.
+                    stack_buffer_size = stack_buffer_size.next_multiple_of(argument_layout.align);
+                    argument_moves.push(ArgumentMove {
+                        argument_index,
+                        source_offset: 0,
+                        size: argument_layout.size,
+                        destination: ArgumentDestination::Stack(stack_buffer_size),
+                    });
+                    stack_buffer_size =
+                        (stack_buffer_size + argument_layout.size).next_multiple_of(8);
+                }
                 Some(RegisterAllocation::One(destination)) => {
                     argument_moves.push(ArgumentMove {
                         argument_index,
@@ -71,22 +78,6 @@ impl MarshalPlan {
             }
         }
 
-        // Arguments are pushed to the stack right to left, which leaves the first argument on the
-        // stack at the lowest address as the stack grows "down" towards lower addresses. Fiffi will
-        // ensure that the first argument on the stack will be aligned to 16 bytes.
-        for (argument_index, argument_layout) in stack_arguments {
-            stack_buffer_size = stack_buffer_size.next_multiple_of(argument_layout.align);
-
-            argument_moves.push(ArgumentMove {
-                argument_index,
-                source_offset: 0,
-                size: argument_layout.size,
-                destination: ArgumentDestination::Stack(stack_buffer_size),
-            });
-
-            stack_buffer_size = (stack_buffer_size + argument_layout.size).next_multiple_of(8);
-        }
-
         MarshalPlan {
             argument_moves,
             stack_buffer_size,
@@ -95,51 +86,39 @@ impl MarshalPlan {
     }
 }
 
-/// Where an argument should be placed.
+/// Argument destination.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ArgumentDestination {
-    /// Place argument in a general purpose register.
-    ///
-    /// The `usize` is the index in the integer register array.
+    /// General-purpose register index.
     Gpr(usize),
 
-    /// Place argument in a XMM register.
-    ///
-    /// The `usize` is the index in the XMM register array.
+    /// XMM register index.
     Xmm(usize),
 
-    /// Place the argument on the stack.
-    ///
-    /// The `usize` is the offset from the start of the buffer that will be put on the stack before
-    /// the call.
+    /// Byte offset in the stack argument buffer.
     Stack(usize),
 }
 
-/// Instructions for Rust for how to prepare arguments for function calls.
+/// Argument copy performed before the call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ArgumentMove {
-    /// The index of the argument to move.
+    /// Argument index.
     pub(super) argument_index: usize,
 
-    /// The offset from the source pointer to start moving data from.
-    ///
-    /// # TODO
-    ///
-    /// This could potentially be something smaller than an usize? Would it shrink this struct
-    /// though?
+    /// Byte offset in the source argument.
     pub(super) source_offset: usize,
 
-    /// The number of bytes to move to `destination`.
+    /// Source bytes to copy.
     pub(super) size: usize,
 
-    /// Where the argument should be moved to.
+    /// Copy destination.
     pub(super) destination: ArgumentDestination,
 }
 
 const GPR_ARGUMENT_REGISTER_COUNT: usize = 6;
 const XMM_ARGUMENT_REGISTER_COUNT: usize = 8;
 
-/// A bank of registers used to pass or return values.
+/// Register bank for arguments and returns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RegisterBank {
     /// General-purpose registers.
@@ -159,38 +138,33 @@ impl RegisterBank {
     }
 }
 
-/// Describes how a function returns its value.
+/// Return value location.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ReturnStrategy {
-    /// The function does not return a value.
+    /// No return value.
     Void,
 
-    /// The function writes its result through a hidden pointer to caller-provided memory.
-    ///
-    /// This is distinct from returning a pointer value, which uses [`Self::SingleRegister`] with
-    /// [`RegisterBank::Gpr`].
+    /// Result written through a hidden pointer to caller-provided memory.
     HiddenPointer,
 
-    /// The function returns its value in one register.
+    /// Result in one register.
     SingleRegister {
-        /// The bank containing the return register.
+        /// Return register bank.
         bank: RegisterBank,
 
-        /// The number of bytes in the result type.
+        /// Result size in bytes.
         byte_length: u8,
     },
 
-    /// The function returns its value in two registers.
+    /// Result in two registers.
     TwoRegisters {
-        /// The bank containing the first eightbyte of the result.
+        /// Bank for the first eightbyte.
         first_bank: RegisterBank,
 
-        /// The bank containing the second eightbyte of the result.
+        /// Bank for the second eightbyte.
         second_bank: RegisterBank,
 
-        /// The number of bytes in the result type stored in the second register.
-        ///
-        /// The first register always provides eight bytes.
+        /// Result bytes in the second register; the first holds eight.
         second_byte_length: u8,
     },
 }

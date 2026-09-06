@@ -1,7 +1,7 @@
 extern crate alloc;
 
+#[cfg(not(test))]
 use alloc::vec::Vec;
-use core::mem::size_of;
 
 use super::classification::ValueClass;
 use crate::types::Type;
@@ -9,8 +9,8 @@ use crate::types::Type;
 const STACK_ARGUMENT_SLOT_SIZE: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct MarshalPlan {
-    /// Where to put arguments to prepare for a function call.
+pub(crate) struct MarshalPlan {
+    /// Argument copies and destinations.
     pub(super) argument_moves: Vec<ArgumentMove>,
 
     /// Bit mask identifying GPR slots containing offsets from the outgoing stack-buffer base.
@@ -19,7 +19,7 @@ pub(super) struct MarshalPlan {
     /// Stack-buffer offsets containing pointers that must be based on the outgoing stack address.
     pub(super) stack_indirect_arguments_offsets: Vec<usize>,
 
-    /// The size of the buffer containing arguments passed on the stack.
+    /// Stack argument and indirect copy buffer size in bytes.
     pub(super) stack_buffer_size: usize,
 
     /// How the function returns its value.
@@ -27,20 +27,16 @@ pub(super) struct MarshalPlan {
 }
 
 impl MarshalPlan {
-    pub(super) fn build(argument_types: &[Type], return_type: Option<&Type>) -> Self {
+    pub(crate) fn build(argument_types: &[Type], return_type: Option<&Type>) -> Self {
         let return_strategy = ReturnStrategy::for_return_type(return_type);
         let mut register_allocator = RegisterSlotAllocator::default();
 
-        // Reserve the first argument register slot for the hidden return pointer if the return
-        // type's strategy is memory. There is always a register available at the start, so we do
-        // not need to check `RegisterAllocator::allocate`'s return value.
+        // Reserve the first slot for a hidden return pointer if needed.
         if return_strategy == ReturnStrategy::HiddenPointer {
             register_allocator.allocate();
         }
 
-        // Every Win64 argument consumes one positional slot. Calculate the stack space required for
-        // argument slots so space required for indirect arguments can be calculated with only one
-        // loop.
+        // Reserve all stack slots before placing indirect copies after them.
         let stack_argument_buffer_size = argument_types
             .len()
             .saturating_sub(register_allocator.available_slots())
@@ -51,8 +47,6 @@ impl MarshalPlan {
         let mut stack_buffer_size = stack_argument_buffer_size;
 
         let mut argument_moves = Vec::with_capacity(argument_types.len());
-        // Bit flag with one bit for each argument register, set to 1 if the register contains an
-        // offset to rsp that must be calculated to correctly pass indirect arguments.
         let mut gpr_indirect_regs_mask = 0;
         let mut stack_indirect_arguments_offsets = Vec::new();
 
@@ -75,10 +69,8 @@ impl MarshalPlan {
             let argument_source = ArgumentSource::Argument { argument_index };
 
             if argument_class == ValueClass::Indirect {
-                // Win64 requires caller-owned copies of indirect arguments to be 16-byte aligned.
-                // The stack buffer itself starts at a 16-byte-aligned address in the call
-                // trampoline. Note that the following line will need to be changed if types that
-                // are aligned to more than 16 bytes are added to fiffi.
+                // Copies and the outgoing stack-buffer base are 16-byte aligned.
+                // Revisit this when adding types with greater alignment.
                 stack_buffer_size = stack_buffer_size.next_multiple_of(16);
                 let argument_copy_offset = stack_buffer_size;
 
@@ -132,19 +124,13 @@ impl MarshalPlan {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ArgumentDestination {
-    /// Place argument in a general purpose register.
-    ///
-    /// The `usize` is the index in the integer register array.
+    /// General-purpose register slot.
     Gpr(usize),
 
-    /// Place argument in a XMM register.
-    ///
-    /// The `usize` is the index in the XMM register array.
+    /// XMM register slot.
     Xmm(usize),
 
-    /// Place the argument on the stack.
-    ///
-    /// The `usize` is the offset from the start of the buffer that will be copied to the stack.
+    /// Byte offset from the outgoing stack-buffer base.
     Stack(usize),
 }
 
@@ -156,10 +142,7 @@ pub(super) enum ArgumentSource {
         argument_index: usize,
     },
 
-    /// Materialize the address at `offset` from the final outgoing stack-buffer base.
-    ///
-    /// These moves must be completed after the assembly trampoline has established the outgoing
-    /// stack address.
+    /// An offset rebased by the trampoline onto the outgoing stack buffer.
     StackAddress {
         /// Offset of the pointee from the start of the outgoing stack buffer.
         offset: usize,
@@ -184,15 +167,13 @@ pub(super) enum ReturnStrategy {
     /// The function does not return a value.
     Void,
 
-    /// The function writes its result through a hidden pointer to caller-provided memory.
-    ///
-    /// This is distinct from returning a pointer value, which uses [`ReturnStrategy::Rax`].
+    /// Writes the result through a hidden first argument.
     HiddenPointer,
 
-    /// The function provides its return value in the `byte_length` first bytes of rax.
+    /// Returns `byte_length` low bytes in `rax`.
     Rax { byte_length: u8 },
 
-    /// The function provides its return value in the `byte_length` first bytes of xmm0.
+    /// Returns `byte_length` low bytes in `xmm0`.
     Xmm0 { byte_length: u8 },
 }
 

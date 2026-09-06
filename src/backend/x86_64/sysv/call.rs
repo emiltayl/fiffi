@@ -12,11 +12,9 @@ use crate::function::{Arg, Ret};
 
 #[derive(Debug)]
 struct CallFrame {
-    /// Arguments passed in integer registers. The two first elements are also used for return
-    /// values passed in integer registers.
+    /// GPR arguments; the first two slots also hold `rax` and `rdx` returns.
     gpr_registers: [Register; 6],
-    /// Arguments passed in xmm registers. The two first elements are also used for return values
-    /// values passed in xmm registers.
+    /// XMM arguments; the first two slots also hold `xmm0` and `xmm1` returns.
     xmm_registers: [Register; 8],
 
     stack_buffer_ptr: *const MaybeUninit<u8>,
@@ -29,10 +27,10 @@ impl CallFrame {
     ///
     /// # Safety
     ///
-    /// `marshal_plan`, `args`, and `ret` must describe the same function signature. Every argument
-    /// referenced by the plan must be readable for its declared layout, and the argument storage
-    /// must not overlap `stack_buffer`. The return storage, and stack buffer must remain alive
-    /// while the returned frame is used.
+    /// - `marshal_plan`, `args`, and `ret` must match the same signature.
+    /// - Arguments must be readable for their layouts and disjoint from `stack_buffer`.
+    /// - `stack_buffer` must have the planned size.
+    /// - Return storage and `stack_buffer` must outlive use of the frame.
     unsafe fn new(
         marshal_plan: &MarshalPlan,
         fn_ptr: FnPtr,
@@ -40,18 +38,15 @@ impl CallFrame {
         ret: &Ret<'_>,
         stack_buffer: &mut [MaybeUninit<u8>],
     ) -> Self {
-        assert_eq!(stack_buffer.len(), marshal_plan.stack_buffer_size);
-
         let mut call_frame = Self {
             gpr_registers: <[Register; 6] as Default>::default(),
             xmm_registers: <[Register; 8] as Default>::default(),
-            stack_buffer_ptr: stack_buffer.as_ptr(),
+            stack_buffer_ptr: ptr::null(),
             stack_buffer_len: stack_buffer.len(),
             fn_ptr,
         };
 
-        // If the return value is passed through a "hidden" pointer, we can simply pass along the
-        // `ret` pointer as the first argument
+        // The hidden return pointer occupies the first GPR.
         if marshal_plan.return_strategy == ReturnStrategy::HiddenPointer {
             let ret_ptr_bytes = ret.as_ptr().expose_provenance().to_ne_bytes();
             call_frame.gpr_registers[0].update_from_bytes(&ret_ptr_bytes);
@@ -59,64 +54,46 @@ impl CallFrame {
 
         for step in &marshal_plan.argument_moves {
             let dst = copy_destination(&mut call_frame, stack_buffer, step);
-            let arg = args
-                .get(step.argument_index)
-                .expect("marshal plan references an argument that was not provided");
+            let arg = &args[step.argument_index];
 
-            // SAFETY: The caller guarantees that `arg` is readable for the layout used to build
-            // `marshal_plan`. The plan guarantees that `source_offset + size` is within that
-            // layout. `dst` is a bounds-checked slice of exactly `size` bytes in fresh call-owned
-            // storage, which the safety contract requires not to overlap the argument storage.
-            // Copying as `MaybeUninit<u8>` permits argument padding bytes to be uninitialized.
+            // SAFETY:
+            // - The signature and plan bound each source copy.
+            // - `dst` is bounds-checked storage disjoint from the arguments.
+            // - `MaybeUninit<u8>` permits uninitialized padding.
             unsafe {
                 let src = arg
                     .as_ptr()
                     .cast::<MaybeUninit<u8>>()
                     .add(step.source_offset);
-                ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), dst.len());
+                ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), step.size);
             }
         }
 
+        call_frame.stack_buffer_ptr = stack_buffer.as_ptr();
         call_frame
     }
 }
 
-/// Returns the exact destination range for an argument move.
-///
-/// A malformed internal marshal plan panics here before any unchecked pointer operation occurs.
+/// Returns the destination range for an argument copy.
 fn copy_destination<'frame>(
     call_frame: &'frame mut CallFrame,
     stack_buffer: &'frame mut [MaybeUninit<u8>],
     step: &ArgumentMove,
 ) -> &'frame mut [MaybeUninit<u8>] {
     match step.destination {
-        ArgumentDestination::Gpr(index) => call_frame
-            .gpr_registers
-            .get_mut(index)
-            .and_then(|register| register.0.get_mut(..step.size))
-            .expect("marshal plan contains an invalid general-purpose register destination"),
-        ArgumentDestination::Xmm(index) => call_frame
-            .xmm_registers
-            .get_mut(index)
-            .and_then(|register| register.0.get_mut(..step.size))
-            .expect("marshal plan contains an invalid vector register destination"),
-        ArgumentDestination::Stack(offset) => stack_buffer
-            .get_mut(offset..(offset + step.size))
-            .expect("marshal plan contains an invalid stack destination"),
+        ArgumentDestination::Gpr(index) => &mut call_frame.gpr_registers[index].0[..step.size],
+        ArgumentDestination::Xmm(index) => &mut call_frame.xmm_registers[index].0[..step.size],
+        ArgumentDestination::Stack(offset) => &mut stack_buffer[offset..offset + step.size],
     }
 }
 
-/// Writes a register-returned value from a call frame into caller-provided storage.
-///
-/// The first two entries in each register bank are reused for the corresponding ABI return
-/// registers: `rax` and `rdx` for the general-purpose bank and `xmm0` and `xmm1` for the vector
-/// bank.
+/// Copies a register return into caller-provided storage.
 ///
 /// # Safety
 ///
-/// The registers selected by `return_strategy` must contain the return value described by the
-/// strategy. For register returns, `ret` must point to writable storage large enough for the
-/// described value, and that storage must not overlap `call_frame`.
+/// - The selected registers must contain the planned return value.
+/// - For register returns, `ret` must be writable for the return layout and disjoint from the
+///   frame.
 unsafe fn write_register_return(
     call_frame: &CallFrame,
     return_strategy: ReturnStrategy,
@@ -132,9 +109,10 @@ unsafe fn write_register_return(
         ReturnStrategy::SingleRegister { bank, byte_length } => {
             let register = return_register(bank, 0);
 
-            // SAFETY: The caller guarantees that `ret` is valid for `byte_length` bytes and does
-            // not overlap `call_frame`. `ReturnStrategy` guarantees that a single-register return
-            // is no larger than the selected register.
+            // SAFETY:
+            // - `byte_length` is at most eight bytes, so the the source register is valid as a
+            //   source when reading `byte_length` bytes.
+            // - The caller provides `byte_length` writable bytes at `ret`, without overlap.
             unsafe {
                 ptr::copy_nonoverlapping(
                     register.0.as_ptr(),
@@ -153,9 +131,10 @@ unsafe fn write_register_return(
             let second_register = return_register(second_bank, second_register_index);
             let ret_ptr = ret.as_ptr().cast::<MaybeUninit<u8>>();
 
-            // SAFETY: The caller guarantees that `ret` is valid for eight bytes plus
-            // `second_byte_length` bytes and does not overlap `call_frame`. `ReturnStrategy`
-            // guarantees that both copy lengths fit in their selected registers.
+            // SAFETY:
+            // - Each source register holds eight bytes; `second_byte_length` is at most eight.
+            // - The caller provides `8 + second_byte_length` writable bytes at `ret`.
+            // - Neither source register overlaps the return storage.
             unsafe {
                 ptr::copy_nonoverlapping(first_register.0.as_ptr(), ret_ptr, 8);
                 ptr::copy_nonoverlapping(
@@ -168,30 +147,36 @@ unsafe fn write_register_return(
     }
 }
 
-/// Calls a function using a SysV marshal plan.
+/// Calls a function using a `SysV` marshal plan.
 ///
 /// # Safety
 ///
-/// The safety contract of [`crate::function::Function::call`] must be upheld. `marshal_plan` must
-/// have been built for the exact signature described by `fn_ptr`, `args`, and `ret`.
-pub(super) unsafe fn call(marshal_plan: &MarshalPlan, fn_ptr: FnPtr, args: &[Arg], ret: Ret) {
+/// - Uphold [`crate::function::Function::call`]'s safety requirements.
+/// - `marshal_plan` must match `fn_ptr`, `args`, and `ret`.
+pub(crate) unsafe fn call(
+    marshal_plan: &MarshalPlan,
+    fn_ptr: FnPtr,
+    args: &[Arg<'_>],
+    ret: Ret<'_>,
+) {
     let mut stack_buffer = vec![MaybeUninit::<u8>::uninit(); marshal_plan.stack_buffer_size];
 
-    // SAFETY: The caller upholds this function's contract. `stack_buffer` is freshly allocated at
-    // the size required by `marshal_plan`, so it cannot overlap the live caller-owned arguments.
+    // SAFETY:
+    // - The caller supplies matching arguments and return storage.
+    // - The fresh buffer has the planned size and outlives the invocation.
     let mut call_frame =
         unsafe { CallFrame::new(marshal_plan, fn_ptr, args, &ret, &mut stack_buffer) };
 
-    // SAFETY: `call_frame` and its backing `stack_buffer` remain alive for the duration of the
-    // invocation. `CallFrame::new` populated them according to `marshal_plan`, and this function's
-    // contract guarantees that the plan matches `fn_ptr`, the arguments, and the return storage.
-    // The assembly supplies the platform-specific unwind metadata required by `invoke`.
+    // SAFETY:
+    // - The frame and its buffer remain alive throughout the invocation.
+    // - The frame matches the signature and storage supplied by the caller.
     unsafe {
         invoke(&raw mut call_frame);
     }
 
-    // SAFETY: The caller guarantees that `ret` is valid for the planned return type. `invoke`
-    // writes register-returned values into the corresponding register slots in `call_frame`.
+    // SAFETY:
+    // - `invoke` saved the return registers in the frame.
+    // - The caller supplies valid return storage, disjoint from the frame.
     unsafe {
         write_register_return(&call_frame, marshal_plan.return_strategy, ret);
     }
@@ -201,11 +186,9 @@ pub(super) unsafe fn call(marshal_plan: &MarshalPlan, fn_ptr: FnPtr, args: &[Arg
 ///
 /// # Safety
 ///
-/// `call_frame` must point to a valid [`CallFrame`] that remains alive for the duration of the
-/// invocation, along with the stack buffer referenced by the frame. Its function pointer must be
-/// callable with the ABI arguments represented by the frame, and every register or stack byte read
-/// by the called function must contain the corresponding argument data. Any return storage must be
-/// valid for the signature. The assembly implementation must also provide correct unwind metadata.
+/// - `call_frame` must be writable and outlive the invocation, together with its buffer.
+/// - Register and stack arguments must match the function pointer's `SysV` signature.
+/// - Return storage must be valid for that signature.
 #[unsafe(naked)]
 unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
     core::arch::naked_asm!(
@@ -214,9 +197,7 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         #[cfg(windows)]
         ".seh_proc {__unwind_function}",
 
-        // Save the caller's frame pointer, then use `rbp` as a stable reference to this frame.
-        // This lets the body move `rsp` while still giving the unwinder a fixed way to find the
-        // caller's stack pointer. The `call_frame` pointer is stored in `r12`.
+        // Preserve nonvolatile registers; `rbp` anchors unwinding while `rsp` moves.
         "push rbp",
         #[cfg(not(windows))]
         ".cfi_adjust_cfa_offset 8",
@@ -274,9 +255,7 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         "movq [r12 + {xmm_registers_offset} + {register_size} * 0], xmm0",
         "movq [r12 + {xmm_registers_offset} + {register_size} * 1], xmm1",
 
-        // Restore the stack in one operation so this remains correct after runtime-sized stack
-        // allocations. `lea` also gives the Windows unwinder a recognized frame-pointer-based
-        // epilogue.
+        // Restore the stack with a Windows-recognized frame-pointer epilogue.
         "lea rsp, [rbp]",
         "pop r12",
         #[cfg(not(windows))]
@@ -292,7 +271,6 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         ".seh_endproc",
         #[cfg(windows)]
         __unwind_function = sym invoke,
-        __stack_probe_interval = const crate::backend::x86_64::asm::STACK_PROBE_INTERVAL,
         stack_buffer_len_offset = const offset_of!(CallFrame, stack_buffer_len),
         stack_buffer_ptr_offset = const offset_of!(CallFrame, stack_buffer_ptr),
 
@@ -307,9 +285,7 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
 mod tests {
     use super::*;
     use crate::fn_ptrize;
-    use crate::test_utils::structs::{
-        F32X3_ARG, F32x3, U64_F64_ARG, U64F64, U64X2_ARG, U64x2, U64x3,
-    };
+    use crate::test_utils::structs::{U64_F64_ARG, U64F64, U64X2_ARG, U64x2, U64x3};
     use crate::types::{FfiType, Type};
 
     extern "C" fn unused_target() {}
@@ -318,9 +294,7 @@ mod tests {
         assert_eq!(bytes.len(), N);
 
         core::array::from_fn(|index| {
-            // SAFETY: The tests only call this helper for registers initialized to zero and
-            // populated from values without padding, or for stack buffers initialized with a
-            // sentinel value before marshalling.
+            // SAFETY: Tests supply initialized bytes without padding.
             unsafe { *bytes[index].assume_init_ref() }
         })
     }
@@ -363,8 +337,9 @@ mod tests {
         for (bank, byte_length, expected_register) in cases {
             let mut return_buffer = [MaybeUninit::new(RETURN_SENTINEL); 16];
 
-            // SAFETY: `return_buffer` is live, non-overlapping storage large enough for each
-            // strategy, and the synthetic frame contains initialized bytes in the selected slot.
+            // SAFETY:
+            // - The buffer is large enough and disjoint from the frame.
+            // - Selected registers contain initialized bytes.
             unsafe {
                 write_register_return(
                     &call_frame,
@@ -394,8 +369,9 @@ mod tests {
         for (bank, expected_first, expected_second) in cases {
             let mut return_buffer = [MaybeUninit::new(RETURN_SENTINEL); 16];
 
-            // SAFETY: `return_buffer` is live, non-overlapping storage large enough for the
-            // strategy, and the synthetic frame contains initialized bytes in both selected slots.
+            // SAFETY:
+            // - The buffer is large enough and disjoint from the frame.
+            // - Selected registers contain initialized bytes.
             unsafe {
                 write_register_return(
                     &call_frame,
@@ -436,8 +412,9 @@ mod tests {
         for (first_bank, second_bank, expected_first, expected_second) in cases {
             let mut return_buffer = [MaybeUninit::new(RETURN_SENTINEL); 16];
 
-            // SAFETY: `return_buffer` is live, non-overlapping storage large enough for the
-            // strategy, and the synthetic frame contains initialized bytes in both selected slots.
+            // SAFETY:
+            // - The buffer is large enough and disjoint from the frame.
+            // - Selected registers contain initialized bytes.
             unsafe {
                 write_register_return(
                     &call_frame,
@@ -490,8 +467,9 @@ mod tests {
         let ret = Ret::void();
         let mut stack_buffer = vec![MaybeUninit::uninit(); marshal_plan.stack_buffer_size];
 
-        // SAFETY: The argument matches the type used to build the plan and cannot overlap the
-        // separately allocated stack buffer. The void return matches the plan.
+        // SAFETY:
+        // - The argument and void return match the plan.
+        // - The separate buffer has the planned size and outlives the frame.
         let call_frame = unsafe {
             CallFrame::new(
                 &marshal_plan,
@@ -516,8 +494,9 @@ mod tests {
             marshal_plan.stack_buffer_size
         ];
 
-        // SAFETY: The argument matches the type used to build the plan and cannot overlap the
-        // separately allocated stack buffer. The void return matches the plan.
+        // SAFETY:
+        // - The argument and void return match the plan.
+        // - The separate buffer has the planned size and outlives the frame.
         let call_frame = unsafe {
             CallFrame::new(
                 &marshal_plan,
@@ -564,8 +543,9 @@ mod tests {
         let ret = Ret::void();
         let mut stack_buffer = alloc::vec![MaybeUninit::new(0xa5); marshal_plan.stack_buffer_size];
 
-        // SAFETY: Every argument matches the corresponding type used to build the plan and cannot
-        // overlap the separately allocated stack buffer. The void return matches the plan.
+        // SAFETY:
+        // - The arguments and void return match the plan.
+        // - The separate buffer has the planned size and outlives the frame.
         let call_frame = unsafe {
             CallFrame::new(
                 &marshal_plan,
@@ -603,8 +583,9 @@ mod tests {
             marshal_plan.stack_buffer_size
         ];
 
-        // SAFETY: The argument and return storage match the types used to build the plan and cannot
-        // overlap the separately allocated stack buffer.
+        // SAFETY:
+        // - The argument and return storage match the plan.
+        // - The separate buffer has the planned size and outlives the frame.
         let call_frame = unsafe {
             CallFrame::new(
                 &marshal_plan,
@@ -623,9 +604,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "marshal plan contains an invalid general-purpose register destination"
-    )]
+    #[should_panic = "range end index 9 out of range for slice of length 8"]
     fn malformed_destination_panics_before_copying() {
         let mut call_frame = CallFrame {
             gpr_registers: <[Register; 6] as Default>::default(),

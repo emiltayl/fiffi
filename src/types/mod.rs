@@ -1,9 +1,8 @@
-//! Types and traits used to describe types for function signatures for use with libffi.
+//! Types and traits for describing FFI function signatures.
 //!
-//! * [`Type`] is an enum for describing types that can be passed to and return from functions
-//!   called through libffi. Variadic arguments types are described by [`VariadicType`] as not all
-//!   types can be passed as variadic arguments.
-//! * [`FfiType`] is a trait that describes the type's layout for use with libffi. Any argument to,
+//! * [`Type`] describes argument and return types. [`VariadicType`] describes the types allowed as
+//!   variadic arguments.
+//! * [`FfiType`] describes a Rust type's layout. Any argument to,
 #![cfg_attr(
     feature = "closure",
     doc = "  or non-void return type from Rust closures used with [`Closure`](`crate::closure::Closure`) must implement [`FfiType`]."
@@ -19,7 +18,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::ffi::c_void;
 
-use crate::errors::{EmptyStructError, InvalidVariadicTypeError};
+use crate::errors::{EmptyStructError, EmptyUnionError, InvalidVariadicTypeError};
 
 pub(crate) mod internal {
     use super::Type;
@@ -43,15 +42,17 @@ pub(crate) mod internal {
         }
 
         /// # Safety
-        /// Must only be called with a non-empty `Vec`.
+        ///
+        /// * `types` must not be empty.
         pub unsafe fn new_unchecked(types: Vec<Type>) -> Self {
             Self(types)
         }
 
         /// # Safety
-        /// Must only be called with a non-empty slice.
+        ///
+        /// * `types` must not be empty.
         pub unsafe fn new_from_slice_unchecked(types: &[Type]) -> Self {
-            // SAFETY: It is up to the caller to ensure that `types` is not empty.
+            // SAFETY: The caller guarantees that `types` is not empty.
             unsafe { Self::new_unchecked(types.to_vec()) }
         }
 
@@ -176,7 +177,7 @@ pub enum VariadicType {
 
     /// C-compatible union with at least one variant.
     ///
-    /// A `Type::Union` must be created using [`VariadicType::create_union`] or
+    /// A `VariadicType::Union` must be created using [`VariadicType::create_union`] or
     /// [`VariadicType::create_union_from_slice`]. This ensures that the union is not empty, as
     /// empty unions are not supported by fiffi.
     Union(internal::NonEmptyVec),
@@ -207,8 +208,7 @@ impl Type {
     ///
     /// # Errors
     ///
-    /// Returns [`EmptyStructError`] if `types` is empty. libffi does not support empty struct
-    /// type descriptions.
+    /// Returns [`EmptyStructError`] if `types` is empty.
     ///
     /// # Example
     ///
@@ -238,56 +238,72 @@ impl Type {
     ///
     /// # Errors
     ///
-    /// Returns [`EmptyStructError`] if `types` is empty. libffi does not support empty struct
-    /// type descriptions.
+    /// Returns [`EmptyStructError`] if `types` is empty.
     pub fn create_struct_from_slice(types: &[Type]) -> Result<Self, EmptyStructError> {
         Self::create_struct(types.to_vec())
     }
 
-    pub fn create_union(types: Vec<Type>) -> Result<Self, EmptyStructError> {
-        internal::NonEmptyVec::new(types)
+    /// Creates a `Type::Union` from its variant types.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EmptyUnionError`] if `variants` is empty.
+    pub fn create_union(variants: Vec<Type>) -> Result<Self, EmptyUnionError> {
+        internal::NonEmptyVec::new(variants)
             .map(Self::Union)
-            .ok_or(EmptyStructError)
+            .ok_or(EmptyUnionError)
     }
 
-    pub fn create_union_from_slice(types: &[Type]) -> Result<Self, EmptyStructError> {
-        Self::create_union(types.to_vec())
+    /// Like [`Type::create_union`], using a slice of variant types.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EmptyUnionError`] if `types` is empty.
+    pub fn create_union_from_slice(variants: &[Type]) -> Result<Self, EmptyUnionError> {
+        Self::create_union(variants.to_vec())
     }
 
-    /// Unchecked version of [`Type::create_struct`] to create a `Type::Struct` without performing
-    /// any checks.
+    /// Like [`Type::create_struct`], without checking for an empty field list.
     ///
     /// # Safety
     ///
-    /// `types` must not be empty. Passing an empty struct type to libffi is not supported and may
-    /// cause undefined behavior.
+    /// * `types` must not be empty.
     pub unsafe fn create_struct_unchecked(types: Vec<Type>) -> Self {
-        // SAFETY: It is up to the caller to uphold safety requirements.
+        // SAFETY: The caller guarantees that `types` is not empty.
         unsafe { Self::Struct(internal::NonEmptyVec::new_unchecked(types)) }
     }
 
-    /// Unchecked version of [`Type::create_struct_from_slice`] to create a `Type::Struct` without
-    /// performing any checks.
+    /// Like [`Type::create_struct_from_slice`], without checking for an empty field list.
     ///
     /// # Safety
     ///
-    /// `types` must not be empty. Passing an empty struct type to libffi is not supported and may
-    /// cause undefined behavior.
+    /// * `types` must not be empty.
     pub unsafe fn create_struct_from_slice_unchecked(types: &[Type]) -> Self {
-        // SAFETY: It is up to the caller to uphold safety requirements.
+        // SAFETY: The caller guarantees that `types` is not empty.
         unsafe { Self::create_struct_unchecked(types.to_vec()) }
     }
 
-    pub unsafe fn create_union_unchecked(types: Vec<Type>) -> Self {
-        // SAFETY: It is up to the caller to uphold safety requirements.
-        unsafe { Self::Union(internal::NonEmptyVec::new_unchecked(types)) }
+    /// Like [`Type::create_union`], without checking for an empty variant list.
+    ///
+    /// # Safety
+    ///
+    /// * `variants` must not be empty.
+    pub unsafe fn create_union_unchecked(variants: Vec<Type>) -> Self {
+        // SAFETY: The caller guarantees that `variants` is not empty.
+        unsafe { Self::Union(internal::NonEmptyVec::new_unchecked(variants)) }
     }
 
-    pub unsafe fn create_union_from_slice_unchecked(types: &[Type]) -> Self {
-        // SAFETY: It is up to the caller to uphold safety requirements.
-        unsafe { Self::create_union_unchecked(types.to_vec()) }
+    /// Like [`Type::create_union_from_slice`], without checking for an empty variant list.
+    ///
+    /// # Safety
+    ///
+    /// * `variants` must not be empty.
+    pub unsafe fn create_union_from_slice_unchecked(variants: &[Type]) -> Self {
+        // SAFETY: The caller guarantees that `variants` is not empty.
+        unsafe { Self::create_union_unchecked(variants.to_vec()) }
     }
 
+    /// Returns this type's size and alignment.
     pub fn layout(&self) -> FfiTypeLayout {
         match self {
             Type::I8 => FfiTypeLayout {
@@ -382,6 +398,7 @@ impl Type {
         }
     }
 
+    /// Returns struct field offsets in declaration order, or an empty vector for other types.
     pub fn field_offsets(&self) -> Vec<usize> {
         // TODO benchmark whether it is worth it to combine `Type::layout` and `Type::field_offsets`
         // for structs to avoid iterating over fields twice.
@@ -411,8 +428,7 @@ impl VariadicType {
     ///
     /// # Errors
     ///
-    /// Returns [`EmptyStructError`] if `types` is empty. libffi does not support empty struct type
-    /// descriptions.
+    /// Returns [`EmptyStructError`] if `types` is empty.
     pub fn create_struct(types: Vec<Type>) -> Result<Self, EmptyStructError> {
         internal::NonEmptyVec::new(types)
             .map(Self::Struct)
@@ -424,72 +440,76 @@ impl VariadicType {
     ///
     /// # Errors
     ///
-    /// Returns [`EmptyStructError`] if `types` is empty. libffi does not support empty struct type
-    /// descriptions.
+    /// Returns [`EmptyStructError`] if `types` is empty.
     pub fn create_struct_from_slice(types: &[Type]) -> Result<Self, EmptyStructError> {
         Self::create_struct(types.to_vec())
     }
 
-    pub fn create_union(types: Vec<Type>) -> Result<Self, EmptyStructError> {
-        internal::NonEmptyVec::new(types)
+    /// Creates a `VariadicType::Union` from its variant types.
+    ///
+    /// Union variants may use any [`Type`], including types subject to variadic promotions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EmptyUnionError`] if `variants` is empty.
+    pub fn create_union(variants: Vec<Type>) -> Result<Self, EmptyUnionError> {
+        internal::NonEmptyVec::new(variants)
             .map(Self::Union)
-            .ok_or(EmptyStructError)
+            .ok_or(EmptyUnionError)
     }
 
-    pub fn create_union_from_slice(types: &[Type]) -> Result<Self, EmptyStructError> {
-        Self::create_union(types.to_vec())
+    /// Like [`VariadicType::create_union`], using a slice of variant types.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EmptyStructError`] if `variants` is empty.
+    pub fn create_union_from_slice(variants: &[Type]) -> Result<Self, EmptyUnionError> {
+        Self::create_union(variants.to_vec())
     }
 
-    /// Unchecked version of [`VariadicType::create_struct`] to create a `VariadicType::Struct`
-    /// without performing any checks.
+    /// Like [`VariadicType::create_struct`], without checking for an empty field list.
     ///
     /// # Safety
     ///
-    /// `types` must not be empty. Passing an empty struct type to libffi is not supported and may
-    /// cause undefined behavior.
+    /// * `types` must not be empty.
     pub unsafe fn create_struct_unchecked(types: Vec<Type>) -> Self {
-        // SAFETY: It is up to the caller to uphold safety requirements.
+        // SAFETY: The caller guarantees that `types` is not empty.
         unsafe { Self::Struct(internal::NonEmptyVec::new_unchecked(types)) }
     }
 
-    /// Unchecked version of [`VariadicType::create_struct_from_slice`] to create a
-    /// `VariadicType::Struct` without performing any checks.
+    /// Like [`VariadicType::create_struct_from_slice`], without checking for an empty field list.
     ///
     /// # Safety
     ///
-    /// `types` must not be empty. Passing an empty struct type to libffi is not supported and may
-    /// cause undefined behavior.
+    /// * `types` must not be empty.
     pub unsafe fn create_struct_from_slice_unchecked(types: &[Type]) -> Self {
-        // SAFETY: It is up to the caller to uphold safety requirements.
+        // SAFETY: The caller guarantees that `types` is not empty.
         unsafe { Self::create_struct_unchecked(types.to_vec()) }
     }
 
-    pub unsafe fn create_union_unchecked(types: Vec<Type>) -> Self {
-        // SAFETY: It is up to the caller to uphold safety requirements.
-        unsafe { Self::Union(internal::NonEmptyVec::new_unchecked(types)) }
+    /// Like [`VariadicType::create_union`], without checking for an empty variant list.
+    ///
+    /// # Safety
+    ///
+    /// * `variants` must not be empty.
+    pub unsafe fn create_union_unchecked(variants: Vec<Type>) -> Self {
+        // SAFETY: The caller guarantees that `variants` is not empty.
+        unsafe { Self::Union(internal::NonEmptyVec::new_unchecked(variants)) }
     }
 
-    pub unsafe fn create_union_from_slice_unchecked(types: &[Type]) -> Self {
-        // SAFETY: It is up to the caller to uphold safety requirements.
-        unsafe { Self::create_union_unchecked(types.to_vec()) }
+    /// Like [`VariadicType::create_union_from_slice`], without checking for an empty variant list.
+    ///
+    /// # Safety
+    ///
+    /// * `variants` must not be empty.
+    pub unsafe fn create_union_from_slice_unchecked(variants: &[Type]) -> Self {
+        // SAFETY: The caller guarantees that `types` is not empty.
+        unsafe { Self::create_union_unchecked(variants.to_vec()) }
     }
 
     /// Convert a `&VariadicType` to a `Type`.
     pub fn to_type(&self) -> Type {
-        match &self {
-            VariadicType::I32 => Type::I32,
-            VariadicType::U32 => Type::U32,
-            VariadicType::I64 => Type::I64,
-            VariadicType::U64 => Type::U64,
-            VariadicType::I128 => Type::I128,
-            VariadicType::U128 => Type::U128,
-            VariadicType::Isize => Type::Isize,
-            VariadicType::Usize => Type::Usize,
-            VariadicType::F64 => Type::F64,
-            VariadicType::Pointer => Type::Pointer,
-            VariadicType::Struct(types) => Type::Struct(types.clone()),
-            VariadicType::Union(types) => Type::Union(types.clone()),
-        }
+        self.clone().into()
     }
 }
 
@@ -519,24 +539,33 @@ impl TryFrom<Type> for VariadicType {
 
 impl From<VariadicType> for Type {
     fn from(value: VariadicType) -> Self {
-        value.to_type()
+        match value {
+            VariadicType::I32 => Self::I32,
+            VariadicType::U32 => Self::U32,
+            VariadicType::I64 => Self::I64,
+            VariadicType::U64 => Self::U64,
+            VariadicType::I128 => Self::I128,
+            VariadicType::U128 => Self::U128,
+            VariadicType::Isize => Self::Isize,
+            VariadicType::Usize => Self::Usize,
+            VariadicType::F64 => Self::F64,
+            VariadicType::Pointer => Self::Pointer,
+            VariadicType::Struct(types) => Self::Struct(types),
+            VariadicType::Union(types) => Self::Union(types),
+        }
     }
 }
 
-/// Trait for Rust types that can be described by a libffi [`Type`] and used for calling FFI
-/// functions.
+/// Rust types that can be described by a [`Type`] for FFI calls.
 ///
-/// Types implementing `FfiType` must be `Copy` as libffi does bitwise copies of values when calling
-/// functions.
+/// Implementors must be `Copy` because fiffi copies values when calling functions.
 ///
 /// # Safety
 ///
-/// * Implementors must ensure that [`FfiType::ffi_type`] exactly describes the type's layout.
+/// * [`FfiType::ffi_type`] must describe the type's field types, layout, and ABI.
 /// * Composite types must use a C-compatible representation such as `#[repr(C)]` or
 ///   `#[repr(transparent)]`.
-/// * For `#[repr(transparent)]` types, `ffi_type()` should return the contained type directly. If a
-///   `#[repr(transparent)]` struct has a single `u32` field, the `ffi_type()` implementation should
-///   be `fn ffi_type() -> Type {Type::U32}`.
+/// * For `#[repr(transparent)]` types, `ffi_type()` must return the contained type's description.
 ///
 /// # Examples
 ///
@@ -588,7 +617,7 @@ impl From<VariadicType> for Type {
 /// );
 /// ```
 pub unsafe trait FfiType: Copy {
-    /// Returns the libffi type description for `Self`.
+    /// Returns the FFI type description for `Self`.
     ///
     /// See [`FfiType`] for examples of `ffi_type` implementations.
     fn ffi_type() -> Type;

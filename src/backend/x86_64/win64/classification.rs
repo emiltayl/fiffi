@@ -2,12 +2,11 @@ use crate::types::Type;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ValueClass {
-    /// Values that may be passed as arguments in GPR registers.
+    /// Passed in a general-purpose register or a stack slot.
     Integer,
-    /// Values that may be passed as arguments in XMM registers.
+    /// Passed in an XMM register or a stack slot.
     Xmm,
-    /// Values that are passed by a pointer to a copy of the argument. The pointer may be passed in
-    /// a GPR register provided there are any register slots available.
+    /// Passed by a pointer to a caller-owned copy.
     Indirect,
 }
 
@@ -29,16 +28,12 @@ impl ValueClass {
             | Type::Pointer => Self::Integer,
             Type::Struct(_) | Type::Union(_) => {
                 let layout = ty.layout();
-                if Self::is_aggregate_size_passed_in_register(layout.size) {
+                if matches!(layout.size, 1 | 2 | 4 | 8) {
                     Self::Integer
                 } else {
                     Self::Indirect
                 }
             }
         }
-    }
-
-    fn is_aggregate_size_passed_in_register(size: usize) -> bool {
-        matches!(size, 1 | 2 | 4 | 8)
     }
 }

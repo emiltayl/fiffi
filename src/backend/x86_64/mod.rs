@@ -14,8 +14,10 @@ use crate::types::Type;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum Abi {
+    /// System V calling convention for `x86_64`.
     #[cfg_attr(not(windows), default)]
     SysV,
+    /// Microsoft Windows calling convention for `x86_64`.
     #[cfg_attr(windows, default)]
     Win64,
 }
@@ -28,15 +30,15 @@ impl Abi {
 
 #[derive(Clone, Debug)]
 pub(crate) enum CallInterface {
-    SysV(sysv::CallInterface),
-    Win64(win64::CallInterface),
+    SysV(sysv::MarshalPlan),
+    Win64(win64::MarshalPlan),
 }
 
 impl CallInterface {
     pub(crate) fn new(argument_types: &[Type], return_type: Option<&Type>, abi: Abi) -> Self {
         match abi {
-            Abi::SysV => Self::SysV(sysv::CallInterface::new(argument_types, return_type)),
-            Abi::Win64 => Self::Win64(win64::CallInterface::new(argument_types, return_type)),
+            Abi::SysV => Self::SysV(sysv::MarshalPlan::build(argument_types, return_type)),
+            Abi::Win64 => Self::Win64(win64::MarshalPlan::build(argument_types, return_type)),
         }
     }
 
@@ -44,21 +46,17 @@ impl CallInterface {
     ///
     /// # Safety
     ///
-    /// The safety contract of [`crate::function::Function::call`] must be upheld. `fn_ptr`, `args`,
-    /// and `ret` must match the signature used to create this interface.
+    /// * Uphold [`crate::function::Function::call`]'s safety requirements.
+    /// * `fn_ptr`, `args`, and `ret` must match this interface's signature.
     pub(crate) unsafe fn call(&self, fn_ptr: FnPtr, args: &[Arg<'_>], ret: Ret<'_>) {
-        match self {
-            // SAFETY: This method has the same safety contract as the ABI-specific call method
-            // and forwards the function pointer, arguments, and return storage unchanged.
-            Self::SysV(call_interface) => unsafe {
-                call_interface.call(fn_ptr, args, ret);
-            },
-
-            // SAFETY: This method has the same safety contract as the ABI-specific call method
-            // and forwards the function pointer, arguments, and return storage unchanged.
-            Self::Win64(call_interface) => unsafe {
-                call_interface.call(fn_ptr, args, ret);
-            },
+        // SAFETY:
+        // * The caller upholds the ABI-specific call contract.
+        // * Each plan was built for this interface's signature.
+        unsafe {
+            match self {
+                Self::SysV(plan) => sysv::call(plan, fn_ptr, args, ret),
+                Self::Win64(plan) => win64::call(plan, fn_ptr, args, ret),
+            }
         }
     }
 }
@@ -69,9 +67,7 @@ struct Register([MaybeUninit<u8>; 8]);
 
 impl Register {
     fn update_from_bytes(&mut self, bytes: &[u8]) {
-        assert!(bytes.len() <= self.0.len());
-
-        for (dst, src) in self.0.iter_mut().zip(bytes.iter()) {
+        for (dst, src) in self.0[..bytes.len()].iter_mut().zip(bytes) {
             dst.write(*src);
         }
     }
