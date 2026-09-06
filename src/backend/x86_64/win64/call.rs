@@ -329,7 +329,9 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
 mod tests {
     use super::*;
     use crate::fn_ptrize;
-    use crate::test_utils::structs::{U8X3_ARG, U8x3, U64X2_ARG, U64x2, U64x3};
+    use crate::test_utils::structs::{
+        F32, F32_ARG, F32X2_ARG, F32x2, U8X3_ARG, U8x3, U64X2_ARG, U64x2, U64x3,
+    };
     use crate::types::{FfiType, Type};
 
     extern "C" fn unused_target() {}
@@ -338,7 +340,7 @@ mod tests {
         assert_eq!(bytes.len(), N);
 
         core::array::from_fn(|index| {
-            // SAFETY: These tests pass only initialized argument or register bytes.
+            // SAFETY: These tests pass only initialized payload, register, or sentinel bytes.
             unsafe { *bytes[index].assume_init_ref() }
         })
     }
@@ -349,6 +351,127 @@ mod tests {
 
     fn register_u64(register: &Register) -> u64 {
         u64::from_ne_bytes(initialized_bytes(&register.0))
+    }
+
+    const GPR_RETURN_0: [u8; 8] = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
+    const XMM_RETURN_LOW: [u8; 8] = [0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57];
+    const XMM_RETURN_HIGH: [u8; 8] = [0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67];
+    const SENTINEL: u8 = 0xa5;
+
+    fn synthetic_return_frame() -> CallFrame {
+        let mut call_frame = CallFrame {
+            gpr_registers: <[Register; 4] as Default>::default(),
+            xmm_registers: <[Register; 4] as Default>::default(),
+            gpr_indirect_regs_mask: 0,
+            stack_indirect_arguments_offsets_ptr: ptr::null(),
+            stack_indirect_arguments_offsets_len: 0,
+            stack_buffer_ptr: ptr::null(),
+            stack_buffer_len: 0,
+            fn_ptr: fn_ptrize!(unused_target),
+        };
+
+        let registers = call_frame
+            .gpr_registers
+            .iter_mut()
+            .chain(&mut call_frame.xmm_registers);
+        for (register, first_byte) in registers.zip((0x10u8..=0x80).step_by(16)) {
+            let bytes = [
+                first_byte,
+                first_byte + 1,
+                first_byte + 2,
+                first_byte + 3,
+                first_byte + 4,
+                first_byte + 5,
+                first_byte + 6,
+                first_byte + 7,
+            ];
+            register.update_from_bytes(&bytes);
+        }
+
+        call_frame
+    }
+
+    #[test]
+    fn scalar_register_returns_copy_only_the_declared_length() {
+        let call_frame = synthetic_return_frame();
+        let cases = [
+            (ReturnStrategy::Rax { byte_length: 1 }, 1, GPR_RETURN_0),
+            (ReturnStrategy::Rax { byte_length: 2 }, 2, GPR_RETURN_0),
+            (ReturnStrategy::Rax { byte_length: 4 }, 4, GPR_RETURN_0),
+            (ReturnStrategy::Rax { byte_length: 8 }, 8, GPR_RETURN_0),
+            (ReturnStrategy::Xmm0 { byte_length: 4 }, 4, XMM_RETURN_LOW),
+            (ReturnStrategy::Xmm0 { byte_length: 8 }, 8, XMM_RETURN_LOW),
+        ];
+
+        for (strategy, byte_length, expected_register) in cases {
+            let mut return_buffer = [MaybeUninit::new(SENTINEL); 24];
+
+            // SAFETY:
+            // * The selected register bytes are initialized.
+            // * The return slice is large enough and disjoint from the frame.
+            unsafe {
+                write_register_return(&call_frame, strategy, Ret::new(&mut return_buffer[8..16]));
+            }
+
+            let actual = initialized_bytes::<24>(&return_buffer);
+            assert_eq!(&actual[..8], &[SENTINEL; 8], "{strategy:?}");
+            assert_eq!(
+                &actual[8..8 + byte_length],
+                &expected_register[..byte_length],
+                "{strategy:?}"
+            );
+            assert_eq!(
+                &actual[8 + byte_length..],
+                &[SENTINEL; 24][8 + byte_length..],
+                "{strategy:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_xmm0_return_copies_both_saved_halves() {
+        let call_frame = synthetic_return_frame();
+        let mut return_buffer = [MaybeUninit::new(SENTINEL); 32];
+
+        // SAFETY:
+        // * Both eight-byte slots holding the saved xmm0 value are initialized.
+        // * The return slice holds 16 bytes and is disjoint from the frame.
+        unsafe {
+            write_register_return(
+                &call_frame,
+                ReturnStrategy::Xmm0 { byte_length: 16 },
+                Ret::new(&mut return_buffer[8..24]),
+            );
+        }
+
+        let actual = initialized_bytes::<32>(&return_buffer);
+        assert_eq!(&actual[..8], &[SENTINEL; 8]);
+        assert_eq!(&actual[8..16], &XMM_RETURN_LOW);
+        assert_eq!(&actual[16..24], &XMM_RETURN_HIGH);
+        assert_eq!(&actual[24..], &[SENTINEL; 8]);
+    }
+
+    #[test]
+    fn non_register_returns_do_not_write_return_storage() {
+        let call_frame = synthetic_return_frame();
+
+        // SAFETY: A void strategy does not access return storage or any register slot.
+        unsafe {
+            write_register_return(&call_frame, ReturnStrategy::Void, Ret::void());
+        }
+
+        let mut return_buffer = [MaybeUninit::new(SENTINEL); 24];
+
+        // SAFETY: A hidden-pointer strategy does not access return storage or any register slot.
+        unsafe {
+            write_register_return(
+                &call_frame,
+                ReturnStrategy::HiddenPointer,
+                Ret::new(&mut return_buffer),
+            );
+        }
+
+        assert_eq!(initialized_bytes::<24>(&return_buffer), [SENTINEL; 24]);
     }
 
     #[test]
@@ -411,6 +534,145 @@ mod tests {
     }
 
     #[test]
+    fn short_arguments_preserve_register_tails_and_stack_slot_padding() {
+        let marshal_plan = MarshalPlan::build(
+            &[
+                Type::U8,
+                Type::U16,
+                Type::U32,
+                Type::F32,
+                Type::U8,
+                Type::U16,
+                Type::U32,
+                Type::F32,
+            ],
+            None,
+        );
+        let first = 0x81u8;
+        let second = 0x9234u16;
+        let third = 0xa345_6789u32;
+        let fourth = -core::f32::consts::PI;
+        let stack_u8 = 0xb2u8;
+        let stack_u16 = 0xc456u16;
+        let stack_u32 = 0xd567_89abu32;
+        let stack_f32 = core::f32::consts::E;
+        let args = [
+            Arg::new(&first),
+            Arg::new(&second),
+            Arg::new(&third),
+            Arg::new(&fourth),
+            Arg::new(&stack_u8),
+            Arg::new(&stack_u16),
+            Arg::new(&stack_u32),
+            Arg::new(&stack_f32),
+        ];
+        let ret = Ret::void();
+        let mut stack_buffer = vec![MaybeUninit::new(SENTINEL); marshal_plan.stack_buffer_size];
+
+        // SAFETY:
+        // * Arguments and the void return match the plan.
+        // * The separate stack buffer has the planned size.
+        // * The plan and buffer outlive the frame.
+        let call_frame = unsafe {
+            CallFrame::new(
+                &marshal_plan,
+                fn_ptrize!(unused_target),
+                &args,
+                &ret,
+                &mut stack_buffer,
+            )
+        };
+
+        // Reading the whole register also checks that its unused high bytes remain zero.
+        assert_eq!(register_u64(&call_frame.gpr_registers[0]), u64::from(first));
+        assert_eq!(
+            register_u64(&call_frame.gpr_registers[1]),
+            u64::from(second)
+        );
+        assert_eq!(register_u64(&call_frame.gpr_registers[2]), u64::from(third));
+        assert_eq!(
+            register_u64(&call_frame.xmm_registers[3]),
+            u64::from(fourth.to_bits())
+        );
+        assert_eq!(register_u64(&call_frame.gpr_registers[3]), 0);
+        for register in &call_frame.xmm_registers[..3] {
+            assert_eq!(register_u64(register), 0);
+        }
+
+        let actual = initialized_bytes::<32>(&stack_buffer);
+        assert_eq!(&actual[..1], &stack_u8.to_ne_bytes());
+        assert_eq!(&actual[1..8], &[SENTINEL; 7]);
+        assert_eq!(&actual[8..10], &stack_u16.to_ne_bytes());
+        assert_eq!(&actual[10..16], &[SENTINEL; 6]);
+        assert_eq!(&actual[16..20], &stack_u32.to_ne_bytes());
+        assert_eq!(&actual[20..24], &[SENTINEL; 4]);
+        assert_eq!(&actual[24..28], &stack_f32.to_ne_bytes());
+        assert_eq!(&actual[28..], &[SENTINEL; 4]);
+    }
+
+    #[test]
+    fn small_float_aggregates_use_gprs_alongside_positional_scalar_floats() {
+        let marshal_plan = MarshalPlan::build(
+            &[F32::ffi_type(), Type::F32, F32x2::ffi_type(), Type::F64],
+            None,
+        );
+        let scalar_f32 = -core::f32::consts::PI;
+        let scalar_f64 = core::f64::consts::E;
+        let args = [
+            Arg::new(&F32_ARG),
+            Arg::new(&scalar_f32),
+            Arg::new(&F32X2_ARG),
+            Arg::new(&scalar_f64),
+        ];
+        let ret = Ret::void();
+        let mut stack_buffer = vec![MaybeUninit::uninit(); marshal_plan.stack_buffer_size];
+
+        // SAFETY:
+        // * Arguments and the void return match the plan.
+        // * The separate stack buffer has the planned size.
+        // * The plan and buffer outlive the frame.
+        let call_frame = unsafe {
+            CallFrame::new(
+                &marshal_plan,
+                fn_ptrize!(unused_target),
+                &args,
+                &ret,
+                &mut stack_buffer,
+            )
+        };
+
+        assert_eq!(
+            register_u64(&call_frame.gpr_registers[0]),
+            u64::from(F32_ARG.a.to_bits())
+        );
+        assert_eq!(
+            initialized_bytes::<4>(&call_frame.gpr_registers[2].0[..4]),
+            F32X2_ARG.a.to_ne_bytes()
+        );
+        assert_eq!(
+            initialized_bytes::<4>(&call_frame.gpr_registers[2].0[4..]),
+            F32X2_ARG.b.to_ne_bytes()
+        );
+        assert_eq!(
+            register_u64(&call_frame.xmm_registers[1]),
+            u64::from(scalar_f32.to_bits())
+        );
+        assert_eq!(
+            register_u64(&call_frame.xmm_registers[3]),
+            scalar_f64.to_bits()
+        );
+        for index in [0, 2] {
+            assert_eq!(register_u64(&call_frame.xmm_registers[index]), 0);
+        }
+        for index in [1, 3] {
+            assert_eq!(register_u64(&call_frame.gpr_registers[index]), 0);
+        }
+        assert!(stack_buffer.is_empty());
+        assert_eq!(call_frame.gpr_indirect_regs_mask, 0);
+        assert_eq!(call_frame.stack_indirect_arguments_offsets_len, 0);
+    }
+
+    #[test]
     fn indirect_arguments_store_copies_and_deferred_stack_addresses() {
         let marshal_plan = MarshalPlan::build(
             &[
@@ -433,7 +695,7 @@ mod tests {
             Arg::new(&U64X2_ARG),
         ];
         let ret = Ret::void();
-        let mut stack_buffer = vec![MaybeUninit::new(0xa5); marshal_plan.stack_buffer_size];
+        let mut stack_buffer = vec![MaybeUninit::new(SENTINEL); marshal_plan.stack_buffer_size];
 
         // SAFETY:
         // * Arguments and the void return match the plan.
@@ -461,9 +723,14 @@ mod tests {
             usize::from_ne_bytes(initialized_bytes(&stack_buffer[..8])),
             32
         );
+        assert_eq!(initialized_bytes::<8>(&stack_buffer[8..16]), [SENTINEL; 8]);
         assert_eq!(
             initialized_bytes::<3>(&stack_buffer[16..19]),
             [U8X3_ARG.a, U8X3_ARG.b, U8X3_ARG.c]
+        );
+        assert_eq!(
+            initialized_bytes::<13>(&stack_buffer[19..32]),
+            [SENTINEL; 13]
         );
         assert_eq!(
             initialized_bytes::<8>(&stack_buffer[32..40]),
@@ -479,6 +746,124 @@ mod tests {
         );
         assert_eq!(call_frame.stack_indirect_arguments_offsets_len, 1);
         assert_eq!(marshal_plan.stack_indirect_arguments_offsets, [0]);
+        assert_eq!(call_frame.stack_buffer_ptr, stack_buffer.as_ptr());
+        assert_eq!(call_frame.stack_buffer_len, stack_buffer.len());
+    }
+
+    #[test]
+    fn indirect_arguments_fill_all_gprs_and_multiple_stack_pointer_slots() {
+        let argument_types = core::array::from_fn::<_, 6, _>(|_| U8x3::ffi_type());
+        let marshal_plan = MarshalPlan::build(&argument_types, None);
+        let values = [0x10u8, 0x20, 0x30, 0x40, 0x50, 0x60].map(|first| U8x3 {
+            a: first,
+            b: first + 1,
+            c: first + 2,
+        });
+        let args = values.each_ref().map(Arg::new);
+        let ret = Ret::void();
+        let mut stack_buffer = vec![MaybeUninit::new(SENTINEL); marshal_plan.stack_buffer_size];
+
+        // SAFETY:
+        // * The six arguments and void return match the plan.
+        // * The separate stack buffer has the planned size.
+        // * The plan and buffer outlive the frame.
+        let call_frame = unsafe {
+            CallFrame::new(
+                &marshal_plan,
+                fn_ptrize!(unused_target),
+                &args,
+                &ret,
+                &mut stack_buffer,
+            )
+        };
+
+        assert_eq!(call_frame.gpr_indirect_regs_mask, 0b1111);
+        for (register, expected_offset) in call_frame.gpr_registers.iter().zip([16, 32, 48, 64]) {
+            assert_eq!(register_usize(register), expected_offset);
+        }
+        assert_eq!(
+            usize::from_ne_bytes(initialized_bytes(&stack_buffer[..8])),
+            80
+        );
+        assert_eq!(
+            usize::from_ne_bytes(initialized_bytes(&stack_buffer[8..16])),
+            96
+        );
+        assert_eq!(marshal_plan.stack_indirect_arguments_offsets, [0, 8]);
+        assert_eq!(
+            call_frame.stack_indirect_arguments_offsets_ptr,
+            marshal_plan.stack_indirect_arguments_offsets.as_ptr()
+        );
+        assert_eq!(call_frame.stack_indirect_arguments_offsets_len, 2);
+
+        for (value, offset) in values.iter().zip([16, 32, 48, 64, 80, 96]) {
+            assert_eq!(
+                initialized_bytes::<3>(&stack_buffer[offset..offset + 3]),
+                [value.a, value.b, value.c],
+                "copy at offset {offset}"
+            );
+            if offset < 96 {
+                assert_eq!(
+                    initialized_bytes::<13>(&stack_buffer[offset + 3..offset + 16]),
+                    [SENTINEL; 13],
+                    "padding after copy at offset {offset}"
+                );
+            }
+        }
+        assert_eq!(stack_buffer.len(), 99);
+        assert_eq!(call_frame.stack_buffer_ptr, stack_buffer.as_ptr());
+        assert_eq!(call_frame.stack_buffer_len, stack_buffer.len());
+    }
+
+    #[test]
+    fn hidden_return_pointer_shifts_mixed_arguments_into_registers_and_stack() {
+        let return_type = U64x3::ffi_type();
+        let marshal_plan = MarshalPlan::build(
+            &[Type::U64, Type::F64, Type::U64, Type::F32],
+            Some(&return_type),
+        );
+        let first = 0x1020_3040_5060_7080u64;
+        let second = core::f64::consts::PI;
+        let third = 0x90a0_b0c0_d0e0_f000u64;
+        let fourth = -core::f32::consts::E;
+        let args = [
+            Arg::new(&first),
+            Arg::new(&second),
+            Arg::new(&third),
+            Arg::new(&fourth),
+        ];
+        let mut return_value = MaybeUninit::<U64x3>::uninit();
+        let ret = Ret::new(&mut return_value);
+        let return_address = ret.as_ptr().expose_provenance();
+        let mut stack_buffer = vec![MaybeUninit::new(SENTINEL); marshal_plan.stack_buffer_size];
+
+        // SAFETY:
+        // * Arguments and return storage match the plan.
+        // * The separate stack buffer has the planned size.
+        // * The plan, return storage, and buffer outlive the frame.
+        let call_frame = unsafe {
+            CallFrame::new(
+                &marshal_plan,
+                fn_ptrize!(unused_target),
+                &args,
+                &ret,
+                &mut stack_buffer,
+            )
+        };
+
+        assert_eq!(register_usize(&call_frame.gpr_registers[0]), return_address);
+        assert_eq!(register_u64(&call_frame.gpr_registers[1]), first);
+        assert_eq!(register_u64(&call_frame.xmm_registers[2]), second.to_bits());
+        assert_eq!(register_u64(&call_frame.gpr_registers[3]), third);
+        assert_eq!(register_u64(&call_frame.gpr_registers[2]), 0);
+        for index in [0, 1, 3] {
+            assert_eq!(register_u64(&call_frame.xmm_registers[index]), 0);
+        }
+        let actual = initialized_bytes::<8>(&stack_buffer);
+        assert_eq!(&actual[..4], &fourth.to_ne_bytes());
+        assert_eq!(&actual[4..], &[SENTINEL; 4]);
+        assert_eq!(call_frame.gpr_indirect_regs_mask, 0);
+        assert_eq!(call_frame.stack_indirect_arguments_offsets_len, 0);
     }
 
     #[test]
