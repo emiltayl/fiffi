@@ -53,7 +53,7 @@ impl CallFrame {
         }
 
         for step in &marshal_plan.argument_moves {
-            let dst = copy_destination(&mut call_frame, stack_buffer, step);
+            let (dst, source_offset) = copy_destination(&mut call_frame, stack_buffer, step);
             let arg = &args[step.argument_index];
 
             // SAFETY:
@@ -61,11 +61,8 @@ impl CallFrame {
             // - `dst` is bounds-checked storage disjoint from the arguments.
             // - `MaybeUninit<u8>` permits uninitialized padding.
             unsafe {
-                let src = arg
-                    .as_ptr()
-                    .cast::<MaybeUninit<u8>>()
-                    .add(step.source_offset);
-                ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), step.size);
+                let src = arg.as_ptr().cast::<MaybeUninit<u8>>().add(source_offset);
+                ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), dst.len());
             }
         }
 
@@ -74,16 +71,32 @@ impl CallFrame {
     }
 }
 
-/// Returns the destination range for an argument copy.
+/// Returns the destination range and source byte offset for an argument copy.
 fn copy_destination<'frame>(
     call_frame: &'frame mut CallFrame,
     stack_buffer: &'frame mut [MaybeUninit<u8>],
     step: &ArgumentMove,
-) -> &'frame mut [MaybeUninit<u8>] {
+) -> (&'frame mut [MaybeUninit<u8>], usize) {
     match step.destination {
-        ArgumentDestination::Gpr(index) => &mut call_frame.gpr_registers[index].0[..step.size],
-        ArgumentDestination::Xmm(index) => &mut call_frame.xmm_registers[index].0[..step.size],
-        ArgumentDestination::Stack(offset) => &mut stack_buffer[offset..offset + step.size],
+        ArgumentDestination::Gpr {
+            index,
+            source_offset,
+            size,
+        } => (
+            &mut call_frame.gpr_registers[usize::from(index)].0[..usize::from(size)],
+            usize::from(source_offset),
+        ),
+        ArgumentDestination::Xmm {
+            index,
+            source_offset,
+            size,
+        } => (
+            &mut call_frame.xmm_registers[usize::from(index)].0[..usize::from(size)],
+            usize::from(source_offset),
+        ),
+        ArgumentDestination::Stack { offset, size } => {
+            (&mut stack_buffer[offset..offset + size], 0)
+        }
     }
 }
 
@@ -616,9 +629,11 @@ mod tests {
         let mut stack_buffer = [];
         let invalid_move = ArgumentMove {
             argument_index: 0,
-            source_offset: 0,
-            size: 9,
-            destination: ArgumentDestination::Gpr(0),
+            destination: ArgumentDestination::Gpr {
+                index: 0,
+                source_offset: 0,
+                size: 9,
+            },
         };
 
         let _ = copy_destination(&mut call_frame, &mut stack_buffer, &invalid_move);

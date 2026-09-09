@@ -4,7 +4,7 @@ use alloc::vec;
 use core::mem::{MaybeUninit, offset_of};
 use core::ptr;
 
-use super::plan::{ArgumentDestination, ArgumentSource, MarshalPlan, ReturnStrategy};
+use super::plan::{ArgumentMove, MarshalPlan, ReturnStrategy};
 use crate::FnPtr;
 use crate::backend::x86_64::Register;
 use crate::backend::x86_64::asm::stack_setup_asm;
@@ -68,40 +68,59 @@ impl CallFrame {
         }
 
         for step in &marshal_plan.argument_moves {
-            let destination = match &step.destination {
-                ArgumentDestination::Gpr(index) => {
-                    &mut call_frame.gpr_registers[*index].0[..step.size]
+            let (argument_index, destination) = match *step {
+                ArgumentMove::ArgumentToGpr {
+                    argument_index,
+                    index,
+                    size,
+                } => (
+                    argument_index,
+                    &mut call_frame.gpr_registers[usize::from(index)].0[..usize::from(size)],
+                ),
+                ArgumentMove::ArgumentToXmm {
+                    argument_index,
+                    index,
+                    size,
+                } => (
+                    argument_index,
+                    &mut call_frame.xmm_registers[usize::from(index)].0[..usize::from(size)],
+                ),
+                ArgumentMove::ArgumentToStack {
+                    argument_index,
+                    offset,
+                    size,
+                } => (argument_index, &mut stack_buffer[offset..offset + size]),
+                ArgumentMove::StackAddressToGpr { offset, index } => {
+                    call_frame.gpr_registers[usize::from(index)]
+                        .update_from_bytes(&offset.to_ne_bytes());
+                    continue;
                 }
-                ArgumentDestination::Xmm(index) => {
-                    &mut call_frame.xmm_registers[*index].0[..step.size]
-                }
-                ArgumentDestination::Stack(offset) => {
-                    &mut stack_buffer[*offset..(*offset + step.size)]
-                }
-            };
-            match &step.source {
-                ArgumentSource::Argument { argument_index } => {
-                    let arg = &args[*argument_index];
-
-                    // SAFETY:
-                    // * The caller provides readable argument storage of the planned size.
-                    // * The destination is in bounds and does not overlap the argument.
-                    // * `MaybeUninit<u8>` permits uninitialized padding.
-                    unsafe {
-                        ptr::copy_nonoverlapping(
-                            arg.as_ptr().cast::<MaybeUninit<u8>>(),
-                            destination.as_mut_ptr(),
-                            destination.len(),
-                        );
-                    }
-                }
-                ArgumentSource::StackAddress { offset } => {
-                    let offset_bytes = offset.to_ne_bytes();
-                    for (destination_byte, offset_byte) in destination.iter_mut().zip(offset_bytes)
+                ArgumentMove::StackAddressToStack {
+                    source_offset,
+                    destination_offset,
+                } => {
+                    let destination = &mut stack_buffer
+                        [destination_offset..destination_offset + size_of::<usize>()];
+                    for (destination_byte, offset_byte) in
+                        destination.iter_mut().zip(source_offset.to_ne_bytes())
                     {
                         destination_byte.write(offset_byte);
                     }
+                    continue;
                 }
+            };
+            let arg = &args[argument_index];
+
+            // SAFETY:
+            // * The caller provides readable argument storage of the planned size.
+            // * The destination is in bounds and does not overlap the argument.
+            // * `MaybeUninit<u8>` permits uninitialized padding.
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    arg.as_ptr().cast::<MaybeUninit<u8>>(),
+                    destination.as_mut_ptr(),
+                    destination.len(),
+                );
             }
         }
 
@@ -745,7 +764,7 @@ mod tests {
             marshal_plan.stack_indirect_arguments_offsets.as_ptr()
         );
         assert_eq!(call_frame.stack_indirect_arguments_offsets_len, 1);
-        assert_eq!(marshal_plan.stack_indirect_arguments_offsets, [0]);
+        assert_eq!(marshal_plan.stack_indirect_arguments_offsets.as_ref(), [0]);
         assert_eq!(call_frame.stack_buffer_ptr, stack_buffer.as_ptr());
         assert_eq!(call_frame.stack_buffer_len, stack_buffer.len());
     }
@@ -789,7 +808,10 @@ mod tests {
             usize::from_ne_bytes(initialized_bytes(&stack_buffer[8..16])),
             96
         );
-        assert_eq!(marshal_plan.stack_indirect_arguments_offsets, [0, 8]);
+        assert_eq!(
+            marshal_plan.stack_indirect_arguments_offsets.as_ref(),
+            [0, 8]
+        );
         assert_eq!(
             call_frame.stack_indirect_arguments_offsets_ptr,
             marshal_plan.stack_indirect_arguments_offsets.as_ptr()

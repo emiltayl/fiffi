@@ -1,7 +1,7 @@
 extern crate alloc;
 
 #[cfg(not(test))]
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 
 use super::classification::ValueClass;
 use crate::types::Type;
@@ -9,7 +9,7 @@ use crate::types::Type;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MarshalPlan {
     /// Argument copies and destinations.
-    pub(super) argument_moves: Vec<ArgumentMove>,
+    pub(super) argument_moves: Box<[ArgumentMove]>,
 
     /// Stack argument buffer size in bytes.
     pub(super) stack_buffer_size: usize,
@@ -45,9 +45,10 @@ impl MarshalPlan {
                     stack_buffer_size = stack_buffer_size.next_multiple_of(argument_layout.align);
                     argument_moves.push(ArgumentMove {
                         argument_index,
-                        source_offset: 0,
-                        size: argument_layout.size,
-                        destination: ArgumentDestination::Stack(stack_buffer_size),
+                        destination: ArgumentDestination::Stack {
+                            offset: stack_buffer_size,
+                            size: argument_layout.size,
+                        },
                     });
                     stack_buffer_size =
                         (stack_buffer_size + argument_layout.size).next_multiple_of(8);
@@ -55,48 +56,66 @@ impl MarshalPlan {
                 Some(RegisterAllocation::One(destination)) => {
                     argument_moves.push(ArgumentMove {
                         argument_index,
-                        source_offset: 0,
-                        size: argument_layout.size,
-                        destination,
+                        destination: destination.into_destination(0, argument_layout.size),
                     });
                 }
                 Some(RegisterAllocation::Two(first_destination, second_destination)) => {
                     argument_moves.push(ArgumentMove {
                         argument_index,
-                        source_offset: 0,
-                        size: 8,
-                        destination: first_destination,
+                        destination: first_destination.into_destination(0, 8),
                     });
 
                     argument_moves.push(ArgumentMove {
                         argument_index,
-                        source_offset: 8,
-                        size: argument_layout.size - 8,
-                        destination: second_destination,
+                        destination: second_destination
+                            .into_destination(8, argument_layout.size - 8),
                     });
                 }
             }
         }
 
         MarshalPlan {
-            argument_moves,
+            argument_moves: argument_moves.into_boxed_slice(),
             stack_buffer_size,
             return_strategy,
         }
     }
 }
 
-/// Argument destination.
+/// Argument destination and copy range.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(
+    variant_size_differences,
+    reason = "Stack offsets and sizes stay pointer-width while register metadata is compact"
+)]
 pub(super) enum ArgumentDestination {
-    /// General-purpose register index.
-    Gpr(usize),
+    /// Copy part of an argument into a general-purpose register.
+    Gpr {
+        /// Register index.
+        index: u8,
+        /// Byte offset in the source argument.
+        source_offset: u8,
+        /// Source bytes to copy.
+        size: u8,
+    },
 
-    /// XMM register index.
-    Xmm(usize),
+    /// Copy part of an argument into an XMM register.
+    Xmm {
+        /// Register index.
+        index: u8,
+        /// Byte offset in the source argument.
+        source_offset: u8,
+        /// Source bytes to copy.
+        size: u8,
+    },
 
-    /// Byte offset in the stack argument buffer.
-    Stack(usize),
+    /// Copy the whole argument, starting at source offset zero, into the stack buffer.
+    Stack {
+        /// Byte offset in the stack argument buffer.
+        offset: usize,
+        /// Source bytes to copy.
+        size: usize,
+    },
 }
 
 /// Argument copy performed before the call.
@@ -105,13 +124,7 @@ pub(super) struct ArgumentMove {
     /// Argument index.
     pub(super) argument_index: usize,
 
-    /// Byte offset in the source argument.
-    pub(super) source_offset: usize,
-
-    /// Source bytes to copy.
-    pub(super) size: usize,
-
-    /// Copy destination.
+    /// Copy destination and source range.
     pub(super) destination: ArgumentDestination,
 }
 
@@ -230,8 +243,35 @@ impl RegisterRequirements {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RegisterAllocation {
-    One(ArgumentDestination),
-    Two(ArgumentDestination, ArgumentDestination),
+    One(AllocatedRegister),
+    Two(AllocatedRegister, AllocatedRegister),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AllocatedRegister {
+    bank: RegisterBank,
+    index: usize,
+}
+
+impl AllocatedRegister {
+    fn into_destination(self, source_offset: u8, size: usize) -> ArgumentDestination {
+        let index =
+            u8::try_from(self.index).expect("argument register indices cannot exceed seven");
+        let size = u8::try_from(size).expect("register argument copies cannot exceed eight bytes");
+
+        match self.bank {
+            RegisterBank::Gpr => ArgumentDestination::Gpr {
+                index,
+                source_offset,
+                size,
+            },
+            RegisterBank::Xmm => ArgumentDestination::Xmm {
+                index,
+                source_offset,
+                size,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -261,20 +301,21 @@ impl RegisterAllocator {
             && (self.next_xmm_index + xmm_required) <= XMM_ARGUMENT_REGISTER_COUNT
     }
 
-    fn take(&mut self, bank: RegisterBank) -> ArgumentDestination {
-        match bank {
+    fn take(&mut self, bank: RegisterBank) -> AllocatedRegister {
+        let index = match bank {
             RegisterBank::Gpr => {
                 let index = self.next_gpr_index;
                 self.next_gpr_index += 1;
-                ArgumentDestination::Gpr(index)
+                index
             }
 
             RegisterBank::Xmm => {
                 let index = self.next_xmm_index;
                 self.next_xmm_index += 1;
-                ArgumentDestination::Xmm(index)
+                index
             }
-        }
+        };
+        AllocatedRegister { bank, index }
     }
 }
 #[cfg(test)]
@@ -336,15 +377,36 @@ mod tests {
         let mut actual_moves = plan
             .argument_moves
             .iter()
-            .map(|argument_move| ExpectedMove {
-                argument_index: argument_move.argument_index,
-                source_offset: argument_move.source_offset,
-                size: argument_move.size,
-                destination: match argument_move.destination {
-                    ArgumentDestination::Gpr(index) => ExpectedLocation::Gpr(index),
-                    ArgumentDestination::Xmm(index) => ExpectedLocation::Xmm(index),
-                    ArgumentDestination::Stack(offset) => ExpectedLocation::Stack(offset),
-                },
+            .map(|argument_move| {
+                let (destination, source_offset, size) = match argument_move.destination {
+                    ArgumentDestination::Gpr {
+                        index,
+                        source_offset,
+                        size,
+                    } => (
+                        ExpectedLocation::Gpr(usize::from(index)),
+                        usize::from(source_offset),
+                        usize::from(size),
+                    ),
+                    ArgumentDestination::Xmm {
+                        index,
+                        source_offset,
+                        size,
+                    } => (
+                        ExpectedLocation::Xmm(usize::from(index)),
+                        usize::from(source_offset),
+                        usize::from(size),
+                    ),
+                    ArgumentDestination::Stack { offset, size } => {
+                        (ExpectedLocation::Stack(offset), 0, size)
+                    }
+                };
+                ExpectedMove {
+                    argument_index: argument_move.argument_index,
+                    source_offset,
+                    size,
+                    destination,
+                }
             })
             .collect::<Vec<_>>();
 
