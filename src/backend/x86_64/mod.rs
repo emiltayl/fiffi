@@ -18,7 +18,8 @@ pub enum Abi {
     #[cfg_attr(not(windows), default)]
     SysV,
     /// Microsoft Windows calling convention for `x86_64`.
-    #[cfg_attr(windows, default)]
+    // TODO note typically no floats for UEFI
+    #[cfg_attr(any(windows, target_os = "uefi"), default)]
     Win64,
 }
 
