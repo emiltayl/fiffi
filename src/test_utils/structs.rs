@@ -3,7 +3,7 @@
 //! Defined structs in declaration order:
 //! `U8`, `U8x2`, `U8x3`, `U8x7`, `U8x15`, `U16x3`, `U32x2`, `U32x3`, `U32x4`, `U32x17`,
 //! `U64`, `U64x2`, `U64x3`, `U64x4`, `U128`, `U128x2`, `F32`, `F32x2`, `F32x3`, `F32x4`,
-//! `F64`, `F64x2`, `F64x3`, `F64x4`, `U64F64`, `F64U64`, `U32F32`, `F32x3U32`, `U32F32x3`,
+//! `F64`, `F64x2`, `F64x3`, `F64x4`, `F64x8`, `U64F64`, `F64U64`, `U32F32`, `F32x3U32`, `U32F32x3`,
 //! `F64F32`, `U8U16`, `U8U64`, `U64U8`, `U8F64`, `U8F64U8`, `U32U64U32`, `U8U128`, `U128U8`,
 //! `U8U128U8`, `NestedU8U32x2`, `NestedF32x2x2`, `NestedF64x2x2`, `NestedU8U64x2`,
 //! `NestedUnionU32F32`, `NestedUnionU32F32x2`, `NestedU8UnionU64F64`,
@@ -494,6 +494,42 @@ pub static F64X4_ARG: F64x4 = F64x4 {
     b: f64::from_bits(0x3ff0_0000_0000_0008),
     c: f64::from_bits(0x3ff0_0000_0000_0009),
     d: f64::from_bits(0x3ff0_0000_0000_000a),
+};
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[repr(C)]
+pub struct F64x8 {
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub d: f64,
+    pub e: f64,
+    pub f: f64,
+    pub g: f64,
+    pub h: f64,
+}
+
+impl_ffi_struct!(
+    F64x8,
+    Type::F64,
+    Type::F64,
+    Type::F64,
+    Type::F64,
+    Type::F64,
+    Type::F64,
+    Type::F64,
+    Type::F64
+);
+
+pub static F64X8_ARG: F64x8 = F64x8 {
+    a: f64::from_bits(0x3ff0_0000_0000_0001),
+    b: f64::from_bits(0x3ff0_0000_0000_0002),
+    c: f64::from_bits(0x3ff0_0000_0000_0003),
+    d: f64::from_bits(0x3ff0_0000_0000_0004),
+    e: f64::from_bits(0x3ff0_0000_0000_0005),
+    f: f64::from_bits(0x3ff0_0000_0000_0006),
+    g: f64::from_bits(0x3ff0_0000_0000_0007),
+    h: f64::from_bits(0x3ff0_0000_0000_0008),
 };
 
 #[derive(Copy, Clone, Debug, PartialEq)]

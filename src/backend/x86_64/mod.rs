@@ -49,7 +49,7 @@ impl CallInterface {
     ///
     /// * Uphold [`crate::function::Function::call`]'s safety requirements.
     /// * `fn_ptr`, `args`, and `ret` must match this interface's signature.
-    pub(crate) unsafe fn call(&self, fn_ptr: FnPtr, args: &[Arg<'_>], ret: Ret<'_>) {
+    pub(crate) unsafe fn call(&self, fn_ptr: FnPtr, args: &[Arg<'_>], ret: Option<Ret<'_>>) {
         // SAFETY:
         // * The caller upholds the ABI-specific call contract.
         // * Each plan was built for this interface's signature.

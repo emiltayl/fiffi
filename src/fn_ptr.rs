@@ -110,7 +110,7 @@ impl FnPtr {
 ///
 /// ```
 /// use fiffi::fn_ptrize;
-/// use fiffi::function::{Function, Ret};
+/// use fiffi::function::Function;
 ///
 /// extern "C" fn ping() {}
 ///
@@ -118,7 +118,7 @@ impl FnPtr {
 ///
 /// // SAFETY: `function` was built from `ping` which has the function signature `extern "C" fn()`.
 /// unsafe {
-///     function.call(&[], Ret::void());
+///     function.call(&[], None);
 /// }
 /// ```
 #[macro_export]

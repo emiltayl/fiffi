@@ -48,7 +48,7 @@ macro_rules! call_shape_tests_for_abi {
                 let mut output = Large { bytes: [0; LENGTH] };
 
                 // SAFETY: The signature and live argument/return storage match `transform`.
-                unsafe { function.call(&[arg(&LENGTH), arg(&input)], ret(&mut output)); }
+                unsafe { function.call(&[arg(&LENGTH), arg(&input)], Some(ret(&mut output))); }
 
                 assert_eq!(output.bytes, input.bytes.map(|byte| byte ^ 0xff));
             }

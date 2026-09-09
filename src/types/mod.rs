@@ -785,7 +785,7 @@ mod tests {
         assert_ffi_layouts!(
             i8, i16, i32, i64, i128, isize, u8, u16, u32, u64, u128, usize, f32, f64, *const c_void,
             U8, U8x3, U16x3, U32x2, U32x3, U32x4, U64, U64x2, U64x3, U64x4, U128, U128x2, F32,
-            F32x2, F32x3, F32x4, F64, F64x2, F64x3, F64x4, U64F64, F64U64, U32F32, F32x3U32,
+            F32x2, F32x3, F32x4, F64, F64x2, F64x3, F64x4, F64x8, U64F64, F64U64, U32F32, F32x3U32,
             U32F32x3, F64F32, U8U16, U8U64, U64U8, U8F64, U8F64U8, U32U64U32, U8U128, U128U8,
             U8U128U8, NestedU8U32x2, NestedF32x2x2, NestedF64x2x2, NestedU8U64x2,
             NestedUnionU32F32, NestedUnionU32F32x2, NestedU8UnionU64F64, NestedUnionU8U128U8,
@@ -821,6 +821,10 @@ mod tests {
         assert_field_offsets::<F64x2>(&[offset_of!(F64x2, a), offset_of!(F64x2, b)]);
         assert_field_offsets::<F64x3>(&[offset_of!(F64x3, a), offset_of!(F64x3, b), offset_of!(F64x3, c)]);
         assert_field_offsets::<F64x4>(&[offset_of!(F64x4, a), offset_of!(F64x4, b), offset_of!(F64x4, c), offset_of!(F64x4, d)]);
+        assert_field_offsets::<F64x8>(&[
+            offset_of!(F64x8, a), offset_of!(F64x8, b), offset_of!(F64x8, c), offset_of!(F64x8, d),
+            offset_of!(F64x8, e), offset_of!(F64x8, f), offset_of!(F64x8, g), offset_of!(F64x8, h),
+        ]);
         assert_field_offsets::<U64F64>(&[offset_of!(U64F64, a), offset_of!(U64F64, b)]);
         assert_field_offsets::<F64U64>(&[offset_of!(F64U64, a), offset_of!(F64U64, b)]);
         assert_field_offsets::<U32F32>(&[offset_of!(U32F32, a), offset_of!(U32F32, b)]);

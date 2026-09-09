@@ -79,7 +79,7 @@ pub extern "C" fn main() -> ! {
 
     let mut result = 0i32;
 
-    unsafe { function.call([arg(&4i32)], ret(&mut result)) };
+    unsafe { function.call([arg(&4i32)], Some(ret(&mut result))) };
 
     assert_eq!(result, 7);
 

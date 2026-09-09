@@ -35,7 +35,7 @@ impl CallFrame {
         marshal_plan: &MarshalPlan,
         fn_ptr: FnPtr,
         args: &[Arg<'_>],
-        ret: &Ret<'_>,
+        ret: Option<&Ret<'_>>,
         stack_buffer: &mut [MaybeUninit<u8>],
     ) -> Self {
         let mut call_frame = Self {
@@ -48,7 +48,10 @@ impl CallFrame {
 
         // The hidden return pointer occupies the first GPR.
         if marshal_plan.return_strategy == ReturnStrategy::HiddenPointer {
-            let ret_ptr_bytes = ret.as_ptr().expose_provenance().to_ne_bytes();
+            let ret_ptr_bytes = ret
+                .map_or(ptr::null_mut(), Ret::as_ptr)
+                .expose_provenance()
+                .to_ne_bytes();
             call_frame.gpr_registers[0].update_from_bytes(&ret_ptr_bytes);
         }
 
@@ -110,8 +113,9 @@ fn copy_destination<'frame>(
 unsafe fn write_register_return(
     call_frame: &CallFrame,
     return_strategy: ReturnStrategy,
-    ret: Ret<'_>,
+    ret: Option<Ret<'_>>,
 ) {
+    let ret_ptr = ret.as_ref().map_or(ptr::null_mut(), Ret::as_ptr);
     let return_register = |bank: RegisterBank, index: usize| match bank {
         RegisterBank::Gpr => &call_frame.gpr_registers[index],
         RegisterBank::Xmm => &call_frame.xmm_registers[index],
@@ -129,7 +133,7 @@ unsafe fn write_register_return(
             unsafe {
                 ptr::copy_nonoverlapping(
                     register.0.as_ptr(),
-                    ret.as_ptr().cast::<MaybeUninit<u8>>(),
+                    ret_ptr.cast::<MaybeUninit<u8>>(),
                     usize::from(byte_length),
                 );
             }
@@ -142,7 +146,7 @@ unsafe fn write_register_return(
             let first_register = return_register(first_bank, 0);
             let second_register_index = usize::from(first_bank == second_bank);
             let second_register = return_register(second_bank, second_register_index);
-            let ret_ptr = ret.as_ptr().cast::<MaybeUninit<u8>>();
+            let ret_ptr = ret_ptr.cast::<MaybeUninit<u8>>();
 
             // SAFETY:
             // - Each source register holds eight bytes; `second_byte_length` is at most eight.
@@ -170,7 +174,7 @@ pub(crate) unsafe fn call(
     marshal_plan: &MarshalPlan,
     fn_ptr: FnPtr,
     args: &[Arg<'_>],
-    ret: Ret<'_>,
+    ret: Option<Ret<'_>>,
 ) {
     let mut stack_buffer = vec![MaybeUninit::<u8>::uninit(); marshal_plan.stack_buffer_size];
 
@@ -178,7 +182,7 @@ pub(crate) unsafe fn call(
     // - The caller supplies matching arguments and return storage.
     // - The fresh buffer has the planned size and outlives the invocation.
     let mut call_frame =
-        unsafe { CallFrame::new(marshal_plan, fn_ptr, args, &ret, &mut stack_buffer) };
+        unsafe { CallFrame::new(marshal_plan, fn_ptr, args, ret.as_ref(), &mut stack_buffer) };
 
     // SAFETY:
     // - The frame and its buffer remain alive throughout the invocation.
@@ -357,7 +361,7 @@ mod tests {
                 write_register_return(
                     &call_frame,
                     ReturnStrategy::SingleRegister { bank, byte_length },
-                    Ret::new(&mut return_buffer),
+                    Some(Ret::new(&mut return_buffer)),
                 );
             }
 
@@ -393,7 +397,7 @@ mod tests {
                         second_bank: bank,
                         second_byte_length: 5,
                     },
-                    Ret::new(&mut return_buffer),
+                    Some(Ret::new(&mut return_buffer)),
                 );
             }
 
@@ -436,7 +440,7 @@ mod tests {
                         second_bank,
                         second_byte_length: 6,
                     },
-                    Ret::new(&mut return_buffer),
+                    Some(Ret::new(&mut return_buffer)),
                 );
             }
 
@@ -453,7 +457,7 @@ mod tests {
 
         // SAFETY: A void strategy does not access return storage or any register slot.
         unsafe {
-            write_register_return(&call_frame, ReturnStrategy::Void, Ret::void());
+            write_register_return(&call_frame, ReturnStrategy::Void, None);
         }
 
         let mut return_buffer = [MaybeUninit::new(RETURN_SENTINEL); 16];
@@ -463,7 +467,7 @@ mod tests {
             write_register_return(
                 &call_frame,
                 ReturnStrategy::HiddenPointer,
-                Ret::new(&mut return_buffer),
+                Some(Ret::new(&mut return_buffer)),
             );
         }
 
@@ -477,7 +481,7 @@ mod tests {
     fn split_argument_uses_source_offset_for_second_eightbyte() {
         let marshal_plan = MarshalPlan::build(&[U64x2::ffi_type()], None);
         let args = [Arg::new(&U64X2_ARG)];
-        let ret = Ret::void();
+        let ret = None;
         let mut stack_buffer = vec![MaybeUninit::uninit(); marshal_plan.stack_buffer_size];
 
         // SAFETY:
@@ -488,7 +492,7 @@ mod tests {
                 &marshal_plan,
                 fn_ptrize!(unused_target),
                 &args,
-                &ret,
+                ret.as_ref(),
                 &mut stack_buffer,
             )
         };
@@ -501,7 +505,7 @@ mod tests {
     fn mixed_aggregate_marshals_each_eightbyte_to_its_register_bank() {
         let marshal_plan = MarshalPlan::build(&[U64F64::ffi_type()], None);
         let args = [Arg::new(&U64_F64_ARG)];
-        let ret = Ret::void();
+        let ret = None;
         let mut stack_buffer = alloc::vec![
             MaybeUninit::uninit();
             marshal_plan.stack_buffer_size
@@ -515,7 +519,7 @@ mod tests {
                 &marshal_plan,
                 fn_ptrize!(unused_target),
                 &args,
-                &ret,
+                ret.as_ref(),
                 &mut stack_buffer,
             )
         };
@@ -553,7 +557,7 @@ mod tests {
             Arg::new(&stack_u64),
             Arg::new(&stack_u128),
         ];
-        let ret = Ret::void();
+        let ret = None;
         let mut stack_buffer = alloc::vec![MaybeUninit::new(0xa5); marshal_plan.stack_buffer_size];
 
         // SAFETY:
@@ -564,7 +568,7 @@ mod tests {
                 &marshal_plan,
                 fn_ptrize!(unused_target),
                 &args,
-                &ret,
+                ret.as_ref(),
                 &mut stack_buffer,
             )
         };
@@ -591,6 +595,7 @@ mod tests {
         let mut return_value = MaybeUninit::<U64x3>::uninit();
         let ret = Ret::new(&mut return_value);
         let return_address = ret.as_ptr().expose_provenance();
+        let ret = Some(ret);
         let mut stack_buffer = alloc::vec![
             MaybeUninit::uninit();
             marshal_plan.stack_buffer_size
@@ -604,7 +609,7 @@ mod tests {
                 &marshal_plan,
                 fn_ptrize!(unused_target),
                 &args,
-                &ret,
+                ret.as_ref(),
                 &mut stack_buffer,
             )
         };

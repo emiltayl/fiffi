@@ -21,7 +21,7 @@
 //! // `extern "C" fn(i32, i32) -> i32`.
 //! let mut return_value = 0i32;
 //! unsafe {
-//!     function.call(&[arg(&1), arg(&2)], ret(&mut return_value));
+//!     function.call(&[arg(&1), arg(&2)], Some(ret(&mut return_value)));
 //! }
 //!
 //! assert_eq!(return_value, 3);
@@ -33,7 +33,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::marker::PhantomData;
-use core::ptr::{self, null_mut};
+use core::ptr;
 
 #[cfg(msan)]
 use crate::__msan_unpoison;
@@ -93,8 +93,8 @@ where
 
 /// Mutable reference to where the result of [`Function::call`] should be stored.
 ///
-/// Use [`Ret::void`] for functions with no return value. The caller must ensure the storage is
-/// valid for the return type.
+/// Pass `None` to [`Function::call`] for functions with no return value or to discard the result.
+/// The caller must ensure any provided storage is valid for the return type.
 ///
 /// # Example
 ///
@@ -128,13 +128,6 @@ impl<'ret> Ret<'ret> {
         let ret_ptr = ptr::from_mut(ret_ref).cast::<c_void>();
 
         Self(ret_ptr, PhantomData)
-    }
-
-    /// Creates a `Ret` for functions with no return value.
-    ///
-    /// Only use with a [`Function`] created without a return type.
-    pub fn void() -> Self {
-        Self(null_mut(), PhantomData)
     }
 
     pub(crate) fn as_ptr(&self) -> *mut c_void {
@@ -175,7 +168,7 @@ where
 ///
 /// // SAFETY: The function signature used to construct `function` matches `double`.
 /// unsafe {
-///     function.call(&[arg(&input)], ret(&mut output));
+///     function.call(&[arg(&input)], Some(ret(&mut output)));
 /// }
 ///
 /// assert_eq!(output, 42);
@@ -237,7 +230,7 @@ impl Function {
     ///             arg(&format),
     ///             arg(&num),
     ///         ],
-    ///         ret(&mut return_value),
+    ///         Some(ret(&mut return_value)),
     ///     );
     /// }
     ///
@@ -330,6 +323,10 @@ impl Function {
 
     /// Calls the wrapped function pointer.
     ///
+    /// Pass `Some(ret(&mut value))` to store the result, or `None` to discard it or call a function
+    /// with no return value. The function must still be constructed with its actual return type
+    /// when discarding the result.
+    ///
     /// # Safety
     ///
     /// * The wrapped [`FnPtr`] must be valid to call with this function's ABI and signature.
@@ -337,8 +334,8 @@ impl Function {
     /// * Every [`Arg`] in `args` must point to an initialized value matching the corresponding
     ///   [`Type`] the function expects and remain alive for the duration of the call.
     /// * All arguments expected by the called function must be provided.
-    /// * `ret` must be valid to write the return type to, unless the function was created with no
-    ///   return type.
+    /// * If `ret` is `Some`, its storage must be valid to write the return type to, unless the
+    ///   function was created with no return type.
     /// * Calling the target function must not violate Rust aliasing rules for any referenced
     ///   memory.
     ///
@@ -358,12 +355,12 @@ impl Function {
     ///
     /// // SAFETY: The function pointer, argument type, return type, and storage match `add_one`.
     /// unsafe {
-    ///     function.call(&[arg(&input)], ret(&mut output));
+    ///     function.call(&[arg(&input)], Some(ret(&mut output)));
     /// }
     ///
     /// assert_eq!(output, 42);
     /// ```
-    pub unsafe fn call(&self, args: &[Arg<'_>], ret: Ret) {
+    pub unsafe fn call(&self, args: &[Arg<'_>], ret: Option<Ret<'_>>) {
         // SAFETY: The caller upholds the same contract required by `CallInterface::call`.
         unsafe {
             self.call_interface.call(self.fn_ptr, args, ret);

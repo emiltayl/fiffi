@@ -25,6 +25,58 @@ macro_rules! return_only_test {
     };
 }
 
+macro_rules! discard_return_test {
+    (
+        abi: $abi:path, extern_abi: $extern_abi:literal,
+        fn $name:ident() -> $ty:ty = $val:expr,
+        calls: $calls:literal
+    ) => {
+        #[test]
+        fn $name() {
+            use core::mem::MaybeUninit;
+            use core::ptr;
+
+            use crate::function::{Function, arg, ret};
+            use crate::types::{FfiType, Type};
+
+            unsafe extern $extern_abi fn test_callback(call_count: *mut usize) -> $ty {
+                // SAFETY: The test supplies a pointer to its initialized, writable counter.
+                unsafe { *call_count += 1; }
+                $val
+            }
+
+            let function = Function::with_abi(
+                crate::fn_ptrize!(test_callback),
+                &[Type::Pointer],
+                Some(&<$ty as FfiType>::ffi_type()),
+                $abi,
+            );
+            let mut call_count = 0usize;
+            let call_count_pointer = ptr::from_mut(&mut call_count);
+            let args = [arg(&call_count_pointer)];
+
+            for _ in 0..$calls {
+                // SAFETY: The ABI, argument, and return type match `test_callback`, and the
+                // counter remains writable. `None` requests that the result be discarded.
+                unsafe { function.call(&args, None); }
+            }
+            assert_eq!(call_count, $calls);
+
+            // Floating-point cases discard more than the eight x87 stack slots before capturing
+            // a result, so a future x86 backend must pop even discarded floating-point returns.
+            if $calls > 1 {
+                let mut result = MaybeUninit::<$ty>::uninit();
+                // SAFETY: The signature and counter still match, and `result` is valid storage
+                // for the return type.
+                unsafe { function.call(&args, Some(ret(&mut result))); }
+                assert_eq!(call_count, $calls + 1);
+                // SAFETY: The call initialized `result`.
+                assert_eq!(unsafe { result.assume_init() }, $val);
+            }
+        }
+    };
+}
+
 macro_rules! roundtrip_test {
     (abi: $abi:path, extern_abi: $extern_abi:literal, fn $name:ident($ty:ty = $val:expr)) => {
         #[test]
@@ -45,7 +97,7 @@ macro_rules! single_value_test_cases {
         abi: $abi:path,
         extern_abi: $extern_abi:literal,
         $(
-            $module_name:ident: $ty:ty = $expected:path;
+            $module_name:ident: $ty:ty = $expected:path $(, discard: $discard_calls:literal)?;
         )+
     ) => {
         $(
@@ -66,6 +118,14 @@ macro_rules! single_value_test_cases {
                     extern_abi: $extern_abi,
                     fn return_only() -> $ty = EXPECTED_VALUE
                 );
+                $(
+                    crate::function::tests::single_value::discard_return_test!(
+                        abi: $abi,
+                        extern_abi: $extern_abi,
+                        fn discard_return() -> $ty = EXPECTED_VALUE,
+                        calls: $discard_calls
+                    );
+                )?
                 roundtrip_test!(
                     abi: $abi,
                     extern_abi: $extern_abi,
@@ -84,7 +144,7 @@ macro_rules! single_value_tests_for_abi {
             single_value_test_cases! {
                 abi: $abi,
                 extern_abi: $extern_abi,
-                i8: i8 = crate::test_utils::I8_ARG;
+                i8: i8 = crate::test_utils::I8_ARG, discard: 1;
                 i16: i16 = crate::test_utils::I16_ARG;
                 i32: i32 = crate::test_utils::I32_ARG;
                 i64: i64 = crate::test_utils::I64_ARG;
@@ -93,17 +153,17 @@ macro_rules! single_value_tests_for_abi {
                 u8: u8 = crate::test_utils::U8_ARG;
                 u16: u16 = crate::test_utils::U16_ARG;
                 u32: u32 = crate::test_utils::U32_ARG;
-                u64: u64 = crate::test_utils::U64_ARG;
-                u128: u128 = crate::test_utils::U128_ARG;
+                u64: u64 = crate::test_utils::U64_ARG, discard: 1;
+                u128: u128 = crate::test_utils::U128_ARG, discard: 1;
                 usize: usize = crate::test_utils::USIZE_ARG;
-                f32: f32 = crate::test_utils::F32_ARG;
-                f64: f64 = crate::test_utils::F64_ARG;
+                f32: f32 = crate::test_utils::F32_ARG, discard: 16;
+                f64: f64 = crate::test_utils::F64_ARG, discard: 16;
                 ptr: crate::test_utils::Ptr = crate::test_utils::PTR_ARG;
                 struct_u8: crate::test_utils::structs::U8 = crate::test_utils::structs::U8_ARG;
                 struct_u8x2: crate::test_utils::structs::U8x2 =
                     crate::test_utils::structs::U8X2_ARG;
                 struct_u8x3: crate::test_utils::structs::U8x3 =
-                    crate::test_utils::structs::U8X3_ARG;
+                    crate::test_utils::structs::U8X3_ARG, discard: 1;
                 struct_u8x7: crate::test_utils::structs::U8x7 =
                     crate::test_utils::structs::U8X7_ARG;
                 struct_u8x15: crate::test_utils::structs::U8x15 =
@@ -122,7 +182,7 @@ macro_rules! single_value_tests_for_abi {
                 struct_u64x2: crate::test_utils::structs::U64x2 =
                     crate::test_utils::structs::U64X2_ARG;
                 struct_u64x3: crate::test_utils::structs::U64x3 =
-                    crate::test_utils::structs::U64X3_ARG;
+                    crate::test_utils::structs::U64X3_ARG, discard: 1;
                 struct_u64x4: crate::test_utils::structs::U64x4 =
                     crate::test_utils::structs::U64X4_ARG;
                 struct_u128: crate::test_utils::structs::U128 =
@@ -142,9 +202,9 @@ macro_rules! single_value_tests_for_abi {
                 struct_f64x3: crate::test_utils::structs::F64x3 =
                     crate::test_utils::structs::F64X3_ARG;
                 struct_f64x4: crate::test_utils::structs::F64x4 =
-                    crate::test_utils::structs::F64X4_ARG;
+                    crate::test_utils::structs::F64X4_ARG, discard: 1;
                 struct_u64_f64: crate::test_utils::structs::U64F64 =
-                    crate::test_utils::structs::U64_F64_ARG;
+                    crate::test_utils::structs::U64_F64_ARG, discard: 1;
                 struct_f64_u64: crate::test_utils::structs::F64U64 =
                     crate::test_utils::structs::F64_U64_ARG;
                 struct_u32_f32: crate::test_utils::structs::U32F32 =
@@ -232,11 +292,23 @@ macro_rules! single_value_tests_for_abi {
                 union_nested_u64x4_f64x4: crate::test_utils::unions::UnionNestedU64x4F64x4 =
                     crate::test_utils::unions::UNION_NESTED_U64X4_F64X4_ARG;
             }
+
+            // Exercise the eight-member homogeneous floating-point return used by PPC64 ELFv2.
+            mod struct_f64x8 {
+                crate::function::tests::single_value::discard_return_test!(
+                    abi: $abi,
+                    extern_abi: $extern_abi,
+                    fn discard_return() -> crate::test_utils::structs::F64x8 =
+                        crate::test_utils::structs::F64X8_ARG,
+                    calls: 1
+                );
+            }
         }
     };
 }
 
 pub(crate) use arg_only_test;
+pub(crate) use discard_return_test;
 pub(crate) use return_only_test;
 pub(crate) use roundtrip_test;
 pub(crate) use single_value_test_cases;
