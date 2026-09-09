@@ -6,7 +6,7 @@ use alloc::{boxed::Box, vec::Vec};
 use super::classification::ValueClass;
 use crate::types::Type;
 
-const STACK_ARGUMENT_SLOT_SIZE: usize = 8;
+const STACK_SLOT_SIZE: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MarshalPlan {
@@ -14,10 +14,10 @@ pub(crate) struct MarshalPlan {
     pub(super) argument_moves: Box<[ArgumentMove]>,
 
     /// Bit mask identifying GPR slots containing offsets from the outgoing stack-buffer base.
-    pub(super) gpr_indirect_regs_mask: u8,
+    pub(super) indirect_register_mask: u8,
 
     /// Stack-buffer offsets containing pointers that must be based on the outgoing stack address.
-    pub(super) stack_indirect_arguments_offsets: Box<[usize]>,
+    pub(super) indirect_stack_offsets: Box<[usize]>,
 
     /// Stack argument and indirect copy buffer size in bytes.
     pub(super) stack_buffer_size: usize,
@@ -37,18 +37,18 @@ impl MarshalPlan {
         }
 
         // Reserve all stack slots before placing indirect copies after them.
-        let stack_argument_buffer_size = argument_types
+        let stack_arguments_size = argument_types
             .len()
             .saturating_sub(register_allocator.available_slots())
-            .checked_mul(STACK_ARGUMENT_SLOT_SIZE)
+            .checked_mul(STACK_SLOT_SIZE)
             .expect("stack argument buffer size overflow");
 
-        let mut next_stack_argument_offset = 0;
-        let mut stack_buffer_size = stack_argument_buffer_size;
+        let mut next_stack_offset = 0;
+        let mut stack_buffer_size = stack_arguments_size;
 
         let mut argument_moves = Vec::with_capacity(argument_types.len());
-        let mut gpr_indirect_regs_mask = 0;
-        let mut stack_indirect_arguments_offsets = Vec::new();
+        let mut indirect_register_mask = 0;
+        let mut indirect_stack_offsets = Vec::new();
 
         for (argument_index, argument) in argument_types.iter().enumerate() {
             let argument_size = argument.layout().size;
@@ -60,8 +60,8 @@ impl MarshalPlan {
                 }
                 Some(slot_index) => ArgumentDestination::Gpr(slot_index),
                 None => {
-                    let destination = ArgumentDestination::Stack(next_stack_argument_offset);
-                    next_stack_argument_offset += STACK_ARGUMENT_SLOT_SIZE;
+                    let destination = ArgumentDestination::Stack(next_stack_offset);
+                    next_stack_offset += STACK_SLOT_SIZE;
                     destination
                 }
             };
@@ -80,10 +80,10 @@ impl MarshalPlan {
 
                 match &destination {
                     ArgumentDestination::Gpr(index) => {
-                        gpr_indirect_regs_mask |= 1 << *index;
+                        indirect_register_mask |= 1 << *index;
                     }
                     ArgumentDestination::Stack(offset) => {
-                        stack_indirect_arguments_offsets.push(*offset);
+                        indirect_stack_offsets.push(*offset);
                     }
                     ArgumentDestination::Xmm(_) => {
                         unreachable!("indirect arguments are not passed in vector registers");
@@ -98,12 +98,12 @@ impl MarshalPlan {
             }
         }
 
-        debug_assert_eq!(next_stack_argument_offset, stack_argument_buffer_size);
+        debug_assert_eq!(next_stack_offset, stack_arguments_size);
 
         Self {
             argument_moves: argument_moves.into_boxed_slice(),
-            gpr_indirect_regs_mask,
-            stack_indirect_arguments_offsets: stack_indirect_arguments_offsets.into_boxed_slice(),
+            indirect_register_mask,
+            indirect_stack_offsets: indirect_stack_offsets.into_boxed_slice(),
             stack_buffer_size,
             return_strategy,
         }
@@ -344,8 +344,8 @@ mod tests {
                     argument_move(4, 8, ArgumentDestination::Stack(0)),
                 ]
                 .into_boxed_slice(),
-                gpr_indirect_regs_mask: 0,
-                stack_indirect_arguments_offsets: alloc::vec![].into_boxed_slice(),
+                indirect_register_mask: 0,
+                indirect_stack_offsets: alloc::vec![].into_boxed_slice(),
                 stack_buffer_size: 8,
                 return_strategy: ReturnStrategy::Void,
             }
@@ -370,8 +370,8 @@ mod tests {
                     argument_move(3, 4, ArgumentDestination::Stack(0)),
                 ]
                 .into_boxed_slice(),
-                gpr_indirect_regs_mask: 0,
-                stack_indirect_arguments_offsets: alloc::vec![].into_boxed_slice(),
+                indirect_register_mask: 0,
+                indirect_stack_offsets: alloc::vec![].into_boxed_slice(),
                 stack_buffer_size: 8,
                 return_strategy: ReturnStrategy::HiddenPointer,
             }
@@ -404,8 +404,8 @@ mod tests {
                     address_move(32, ArgumentDestination::Stack(0)),
                 ]
                 .into_boxed_slice(),
-                gpr_indirect_regs_mask: 0b0001,
-                stack_indirect_arguments_offsets: alloc::vec![0].into_boxed_slice(),
+                indirect_register_mask: 0b0001,
+                indirect_stack_offsets: alloc::vec![0].into_boxed_slice(),
                 stack_buffer_size: 48,
                 return_strategy: ReturnStrategy::Void,
             }
@@ -424,8 +424,8 @@ mod tests {
                     address_move(0, ArgumentDestination::Gpr(0)),
                 ]
                 .into_boxed_slice(),
-                gpr_indirect_regs_mask: 0b0001,
-                stack_indirect_arguments_offsets: alloc::vec![].into_boxed_slice(),
+                indirect_register_mask: 0b0001,
+                indirect_stack_offsets: alloc::vec![].into_boxed_slice(),
                 stack_buffer_size: 16,
                 return_strategy: ReturnStrategy::Xmm0 { byte_length: 16 },
             }

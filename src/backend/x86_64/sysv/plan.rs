@@ -128,8 +128,8 @@ pub(super) struct ArgumentMove {
     pub(super) destination: ArgumentDestination,
 }
 
-const GPR_ARGUMENT_REGISTER_COUNT: usize = 6;
-const XMM_ARGUMENT_REGISTER_COUNT: usize = 8;
+const ARGUMENT_GPR_COUNT: usize = 6;
+const ARGUMENT_XMM_COUNT: usize = 8;
 
 /// Register bank for arguments and returns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -297,8 +297,8 @@ impl RegisterAllocator {
     fn space_available_for(&self, requirements: RegisterRequirements) -> bool {
         let (gpr_required, xmm_required) = requirements.counts();
 
-        (self.next_gpr_index + gpr_required) <= GPR_ARGUMENT_REGISTER_COUNT
-            && (self.next_xmm_index + xmm_required) <= XMM_ARGUMENT_REGISTER_COUNT
+        (self.next_gpr_index + gpr_required) <= ARGUMENT_GPR_COUNT
+            && (self.next_xmm_index + xmm_required) <= ARGUMENT_XMM_COUNT
     }
 
     fn take(&mut self, bank: RegisterBank) -> AllocatedRegister {

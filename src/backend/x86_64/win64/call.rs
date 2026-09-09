@@ -20,10 +20,10 @@ struct CallFrame {
     xmm_registers: [Register; 4],
 
     /// Bit mask identifying GPR slots containing offsets from the outgoing stack-buffer base.
-    gpr_indirect_regs_mask: u8,
+    indirect_register_mask: u8,
     /// Plan-owned offsets of stack slots rebased onto the outgoing stack buffer.
-    stack_indirect_arguments_offsets_ptr: *const usize,
-    stack_indirect_arguments_offsets_len: usize,
+    indirect_stack_offsets_pointer: *const usize,
+    indirect_stack_offsets_count: usize,
 
     stack_buffer_ptr: *const MaybeUninit<u8>,
     stack_buffer_len: usize,
@@ -49,13 +49,9 @@ impl CallFrame {
         let mut call_frame = Self {
             gpr_registers: <[Register; 4] as Default>::default(),
             xmm_registers: <[Register; 4] as Default>::default(),
-            gpr_indirect_regs_mask: marshal_plan.gpr_indirect_regs_mask,
-            stack_indirect_arguments_offsets_ptr: marshal_plan
-                .stack_indirect_arguments_offsets
-                .as_ptr(),
-            stack_indirect_arguments_offsets_len: marshal_plan
-                .stack_indirect_arguments_offsets
-                .len(),
+            indirect_register_mask: marshal_plan.indirect_register_mask,
+            indirect_stack_offsets_pointer: marshal_plan.indirect_stack_offsets.as_ptr(),
+            indirect_stack_offsets_count: marshal_plan.indirect_stack_offsets.len(),
             stack_buffer_ptr: ptr::null(),
             stack_buffer_len: stack_buffer.len(),
             fn_ptr,
@@ -267,7 +263,7 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
         "movq xmm3, [r12 + {xmm_registers_offset} + {register_size} * 3]",
 
         // Rebase indirect register arguments onto the outgoing stack buffer.
-        "mov al, [r12 + {gpr_indirect_regs_mask_offset}]",
+        "mov al, [r12 + {indirect_register_mask_offset}]",
         "test al, 1 << 0",
         "jz 20f",
         "add rcx, r10",
@@ -286,8 +282,8 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
         "23:",
 
         // Rebase indirect stack arguments onto the outgoing stack buffer.
-        "mov rax, [r12 + {stack_indirect_arguments_offset}]",
-        "mov r11, [r12 + {stack_indirect_arguments_len}]",
+        "mov rax, [r12 + {indirect_stack_pointer_offset}]",
+        "mov r11, [r12 + {indirect_stack_count_offset}]",
 
         "test r11, r11",
         "jz 25f",
@@ -338,9 +334,9 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
 
         fn_ptr_offset = const offset_of!(CallFrame, fn_ptr),
 
-        gpr_indirect_regs_mask_offset = const offset_of!(CallFrame, gpr_indirect_regs_mask),
-        stack_indirect_arguments_offset = const offset_of!(CallFrame, stack_indirect_arguments_offsets_ptr),
-        stack_indirect_arguments_len = const offset_of!(CallFrame, stack_indirect_arguments_offsets_len),
+        indirect_register_mask_offset = const offset_of!(CallFrame, indirect_register_mask),
+        indirect_stack_pointer_offset = const offset_of!(CallFrame, indirect_stack_offsets_pointer),
+        indirect_stack_count_offset = const offset_of!(CallFrame, indirect_stack_offsets_count),
     );
 }
 
@@ -381,9 +377,9 @@ mod tests {
         let mut call_frame = CallFrame {
             gpr_registers: <[Register; 4] as Default>::default(),
             xmm_registers: <[Register; 4] as Default>::default(),
-            gpr_indirect_regs_mask: 0,
-            stack_indirect_arguments_offsets_ptr: ptr::null(),
-            stack_indirect_arguments_offsets_len: 0,
+            indirect_register_mask: 0,
+            indirect_stack_offsets_pointer: ptr::null(),
+            indirect_stack_offsets_count: 0,
             stack_buffer_ptr: ptr::null(),
             stack_buffer_len: 0,
             fn_ptr: fn_ptrize!(unused_target),
@@ -548,8 +544,8 @@ mod tests {
             initialized_bytes::<8>(&stack_buffer),
             stack_argument.to_ne_bytes()
         );
-        assert_eq!(call_frame.gpr_indirect_regs_mask, 0);
-        assert_eq!(call_frame.stack_indirect_arguments_offsets_len, 0);
+        assert_eq!(call_frame.indirect_register_mask, 0);
+        assert_eq!(call_frame.indirect_stack_offsets_count, 0);
     }
 
     #[test]
@@ -687,8 +683,8 @@ mod tests {
             assert_eq!(register_u64(&call_frame.gpr_registers[index]), 0);
         }
         assert!(stack_buffer.is_empty());
-        assert_eq!(call_frame.gpr_indirect_regs_mask, 0);
-        assert_eq!(call_frame.stack_indirect_arguments_offsets_len, 0);
+        assert_eq!(call_frame.indirect_register_mask, 0);
+        assert_eq!(call_frame.indirect_stack_offsets_count, 0);
     }
 
     #[test]
@@ -730,7 +726,7 @@ mod tests {
             )
         };
 
-        assert_eq!(call_frame.gpr_indirect_regs_mask, 0b0001);
+        assert_eq!(call_frame.indirect_register_mask, 0b0001);
         assert_eq!(register_usize(&call_frame.gpr_registers[0]), 16);
         assert_eq!(register_u64(&call_frame.gpr_registers[1]), first_direct);
         assert_eq!(
@@ -760,11 +756,11 @@ mod tests {
             U64X2_ARG.b.to_ne_bytes()
         );
         assert_eq!(
-            call_frame.stack_indirect_arguments_offsets_ptr,
-            marshal_plan.stack_indirect_arguments_offsets.as_ptr()
+            call_frame.indirect_stack_offsets_pointer,
+            marshal_plan.indirect_stack_offsets.as_ptr()
         );
-        assert_eq!(call_frame.stack_indirect_arguments_offsets_len, 1);
-        assert_eq!(marshal_plan.stack_indirect_arguments_offsets.as_ref(), [0]);
+        assert_eq!(call_frame.indirect_stack_offsets_count, 1);
+        assert_eq!(marshal_plan.indirect_stack_offsets.as_ref(), [0]);
         assert_eq!(call_frame.stack_buffer_ptr, stack_buffer.as_ptr());
         assert_eq!(call_frame.stack_buffer_len, stack_buffer.len());
     }
@@ -796,7 +792,7 @@ mod tests {
             )
         };
 
-        assert_eq!(call_frame.gpr_indirect_regs_mask, 0b1111);
+        assert_eq!(call_frame.indirect_register_mask, 0b1111);
         for (register, expected_offset) in call_frame.gpr_registers.iter().zip([16, 32, 48, 64]) {
             assert_eq!(register_usize(register), expected_offset);
         }
@@ -808,15 +804,12 @@ mod tests {
             usize::from_ne_bytes(initialized_bytes(&stack_buffer[8..16])),
             96
         );
+        assert_eq!(marshal_plan.indirect_stack_offsets.as_ref(), [0, 8]);
         assert_eq!(
-            marshal_plan.stack_indirect_arguments_offsets.as_ref(),
-            [0, 8]
+            call_frame.indirect_stack_offsets_pointer,
+            marshal_plan.indirect_stack_offsets.as_ptr()
         );
-        assert_eq!(
-            call_frame.stack_indirect_arguments_offsets_ptr,
-            marshal_plan.stack_indirect_arguments_offsets.as_ptr()
-        );
-        assert_eq!(call_frame.stack_indirect_arguments_offsets_len, 2);
+        assert_eq!(call_frame.indirect_stack_offsets_count, 2);
 
         for (value, offset) in values.iter().zip([16, 32, 48, 64, 80, 96]) {
             assert_eq!(
@@ -884,8 +877,8 @@ mod tests {
         let actual = initialized_bytes::<8>(&stack_buffer);
         assert_eq!(&actual[..4], &fourth.to_ne_bytes());
         assert_eq!(&actual[4..], &[SENTINEL; 4]);
-        assert_eq!(call_frame.gpr_indirect_regs_mask, 0);
-        assert_eq!(call_frame.stack_indirect_arguments_offsets_len, 0);
+        assert_eq!(call_frame.indirect_register_mask, 0);
+        assert_eq!(call_frame.indirect_stack_offsets_count, 0);
     }
 
     #[test]
@@ -914,7 +907,7 @@ mod tests {
             )
         };
 
-        assert_eq!(call_frame.gpr_indirect_regs_mask, 0b0100);
+        assert_eq!(call_frame.indirect_register_mask, 0b0100);
         assert_eq!(register_usize(&call_frame.gpr_registers[0]), return_address);
         assert_eq!(
             register_usize(&call_frame.gpr_registers[1]),
@@ -925,6 +918,6 @@ mod tests {
             initialized_bytes::<16>(&stack_buffer),
             indirect_argument.to_ne_bytes()
         );
-        assert_eq!(call_frame.stack_indirect_arguments_offsets_len, 0);
+        assert_eq!(call_frame.indirect_stack_offsets_count, 0);
     }
 }
