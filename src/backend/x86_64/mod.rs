@@ -15,7 +15,7 @@ use crate::types::Type;
 #[non_exhaustive]
 pub enum Abi {
     /// System V calling convention for `x86_64`.
-    #[cfg_attr(not(windows), default)]
+    #[cfg_attr(not(any(windows, target_os = "uefi")), default)]
     SysV,
     /// Microsoft Windows calling convention for `x86_64`.
     // TODO note typically no floats for UEFI
