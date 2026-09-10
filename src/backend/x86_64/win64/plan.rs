@@ -51,8 +51,8 @@ impl MarshalPlan {
         let mut indirect_stack_offsets = Vec::new();
 
         for (argument_index, argument) in argument_types.iter().enumerate() {
-            let argument_size = argument.layout().size;
-            let argument_class = ValueClass::classify(argument);
+            let argument_layout = argument.layout();
+            let argument_class = ValueClass::classify(argument, &argument_layout);
 
             let destination = match register_allocator.allocate() {
                 Some(slot_index) if argument_class == ValueClass::Xmm => {
@@ -74,7 +74,7 @@ impl MarshalPlan {
 
                 argument_moves.push(ArgumentMove::ArgumentToStack {
                     argument_index,
-                    size: argument_size,
+                    size: argument_layout.size,
                     offset: argument_copy_offset,
                 });
 
@@ -92,9 +92,10 @@ impl MarshalPlan {
 
                 argument_moves.push(destination.address_move(argument_copy_offset));
 
-                stack_buffer_size += argument_size;
+                stack_buffer_size += argument_layout.size;
             } else {
-                argument_moves.push(destination.argument_move(argument_index, argument_size));
+                argument_moves
+                    .push(destination.argument_move(argument_index, argument_layout.size));
             }
         }
 
@@ -236,15 +237,13 @@ impl ReturnStrategy {
             return Self::Xmm0 { byte_length: 16 };
         }
 
-        match ValueClass::classify(return_type) {
-            ValueClass::Indirect => {
-                let return_layout = return_type.layout();
-                Self::HiddenPointer {
-                    size: return_layout.size,
-                    align_log2: u8::try_from(return_layout.align.trailing_zeros())
-                        .expect("`usize::trailing_zeros` will always fit inside an `u8`."),
-                }
-            }
+        let return_layout = return_type.layout();
+        match ValueClass::classify(return_type, &return_layout) {
+            ValueClass::Indirect => Self::HiddenPointer {
+                size: return_layout.size,
+                align_log2: u8::try_from(return_layout.align.trailing_zeros())
+                    .expect("`usize::trailing_zeros` will always fit inside an `u8`."),
+            },
             ValueClass::Integer => {
                 let byte_length = u8::try_from(return_type.layout().size)
                     .expect("values returned in rax cannot exceed eight bytes");

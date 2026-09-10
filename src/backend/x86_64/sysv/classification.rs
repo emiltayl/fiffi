@@ -1,4 +1,4 @@
-use crate::types::Type;
+use crate::types::{FfiTypeLayout, Type};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ValueClass {
@@ -12,8 +12,8 @@ pub(super) enum ValueClass {
 }
 
 impl ValueClass {
-    pub(super) fn classify(ty: &Type) -> Self {
-        if ty.layout().size > 16 {
+    pub(super) fn classify(ty: &Type, layout: &FfiTypeLayout) -> Self {
+        if layout.size > 16 {
             return Self::Memory;
         }
 
@@ -119,7 +119,10 @@ mod tests {
     use crate::types::FfiType;
 
     fn assert_ffi_class<T: FfiType>(expected: ValueClass) {
-        assert_eq!(ValueClass::classify(&T::ffi_type()), expected);
+        assert_eq!(
+            ValueClass::classify(&T::ffi_type(), &T::ffi_type().layout()),
+            expected
+        );
     }
 
     #[test]
@@ -143,7 +146,7 @@ mod tests {
         ];
 
         for (ty, expected) in cases {
-            assert_eq!(ValueClass::classify(&ty), expected);
+            assert_eq!(ValueClass::classify(&ty, &ty.layout()), expected);
         }
     }
 
@@ -211,21 +214,24 @@ mod tests {
         let one_floating_eightbyte =
             Type::create_union_from_slice(&[Type::F32, Type::F64]).unwrap();
         assert_eq!(
-            ValueClass::classify(&one_floating_eightbyte),
+            ValueClass::classify(&one_floating_eightbyte, &one_floating_eightbyte.layout()),
             ValueClass::Sse,
         );
 
         let first_sse_second_integer =
             Type::create_union_from_slice(&[F64U64::ffi_type(), F64x2::ffi_type()]).unwrap();
         assert_eq!(
-            ValueClass::classify(&first_sse_second_integer),
+            ValueClass::classify(
+                &first_sse_second_integer,
+                &first_sse_second_integer.layout()
+            ),
             ValueClass::SseInteger,
         );
 
         for variants in [[Type::F32, Type::U32], [Type::U32, Type::F32]] {
             let integer_dominates = Type::create_union_from_slice(&variants).unwrap();
             assert_eq!(
-                ValueClass::classify(&integer_dominates),
+                ValueClass::classify(&integer_dominates, &integer_dominates.layout()),
                 ValueClass::Integer,
             );
         }
@@ -234,7 +240,7 @@ mod tests {
         let union_at_nonzero_offset =
             Type::create_struct_from_slice(&[Type::U64, floating_union]).unwrap();
         assert_eq!(
-            ValueClass::classify(&union_at_nonzero_offset),
+            ValueClass::classify(&union_at_nonzero_offset, &union_at_nonzero_offset.layout()),
             ValueClass::IntegerSse,
         );
 
@@ -242,7 +248,7 @@ mod tests {
         let union_before_integer =
             Type::create_struct_from_slice(&[floating_union, Type::U64]).unwrap();
         assert_eq!(
-            ValueClass::classify(&union_before_integer),
+            ValueClass::classify(&union_before_integer, &union_before_integer.layout()),
             ValueClass::SseInteger,
         );
     }

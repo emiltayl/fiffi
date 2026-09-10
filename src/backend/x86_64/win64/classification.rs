@@ -1,4 +1,4 @@
-use crate::types::Type;
+use crate::types::{FfiTypeLayout, Type};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ValueClass {
@@ -11,7 +11,7 @@ pub(super) enum ValueClass {
 }
 
 impl ValueClass {
-    pub(super) fn classify(ty: &Type) -> Self {
+    pub(super) fn classify(ty: &Type, layout: &FfiTypeLayout) -> Self {
         match ty {
             Type::I128 | Type::U128 => Self::Indirect,
             Type::F32 | Type::F64 => Self::Xmm,
@@ -27,7 +27,6 @@ impl ValueClass {
             | Type::Usize
             | Type::Pointer => Self::Integer,
             Type::Struct(_) | Type::Union(_) => {
-                let layout = ty.layout();
                 if matches!(layout.size, 1 | 2 | 4 | 8) {
                     Self::Integer
                 } else {

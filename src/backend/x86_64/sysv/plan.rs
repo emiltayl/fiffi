@@ -34,7 +34,7 @@ impl MarshalPlan {
 
         for (argument_index, argument) in argument_types.iter().enumerate() {
             let argument_layout = argument.layout();
-            let argument_class = ValueClass::classify(argument);
+            let argument_class = ValueClass::classify(argument, &argument_layout);
 
             let allocation = RegisterRequirements::for_value_class(argument_class)
                 .and_then(|requirements| register_allocator.allocate(requirements));
@@ -192,11 +192,11 @@ impl ReturnStrategy {
             return Self::Void;
         };
 
-        let Some(register_requirements) =
-            RegisterRequirements::for_value_class(ValueClass::classify(return_type))
-        else {
-            let return_layout = return_type.layout();
+        let return_layout = return_type.layout();
 
+        let Some(register_requirements) = RegisterRequirements::for_value_class(
+            ValueClass::classify(return_type, &return_layout),
+        ) else {
             return Self::HiddenPointer {
                 size: return_layout.size,
                 align_log2: u8::try_from(return_layout.align.trailing_zeros())
