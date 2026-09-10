@@ -28,7 +28,7 @@ impl MarshalPlan {
         let return_strategy = ReturnStrategy::for_return_type(return_type);
 
         // Reserve the first GPR for the hidden return pointer if needed.
-        if return_strategy == ReturnStrategy::HiddenPointer {
+        if matches!(return_strategy, ReturnStrategy::HiddenPointer { .. }) {
             register_allocator.allocate(RegisterRequirements::One(RegisterBank::Gpr));
         }
 
@@ -152,13 +152,17 @@ impl RegisterBank {
 }
 
 /// Return value location.
+#[expect(
+    variant_size_differences,
+    reason = "Return type layout must be stored to support discarding return values."
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ReturnStrategy {
     /// No return value.
     Void,
 
     /// Result written through a hidden pointer to caller-provided memory.
-    HiddenPointer,
+    HiddenPointer { size: usize, align_log2: u8 },
 
     /// Result in one register.
     SingleRegister {
@@ -191,7 +195,13 @@ impl ReturnStrategy {
         let Some(register_requirements) =
             RegisterRequirements::for_value_class(ValueClass::classify(return_type))
         else {
-            return Self::HiddenPointer;
+            let return_layout = return_type.layout();
+
+            return Self::HiddenPointer {
+                size: return_layout.size,
+                align_log2: u8::try_from(return_layout.align.trailing_zeros())
+                    .expect("`usize::trailing_zeros` will always fit inside an `u8`."),
+            };
         };
 
         let byte_length = u8::try_from(return_type.layout().size)
@@ -434,6 +444,8 @@ mod tests {
         let sse_sse = struct_type(&[Type::F32, Type::F32, Type::F32]);
         let memory = struct_type(&[Type::U64, Type::U64, Type::U64]);
 
+        let memory_layout = memory.layout();
+
         let cases = [
             (None, ReturnStrategy::Void),
             (
@@ -496,7 +508,14 @@ mod tests {
                     second_byte_length: 4,
                 },
             ),
-            (Some(memory), ReturnStrategy::HiddenPointer),
+            (
+                Some(memory),
+                ReturnStrategy::HiddenPointer {
+                    size: memory_layout.size,
+                    align_log2: u8::try_from(memory_layout.align.trailing_zeros())
+                        .expect("`usize::trailing_zeros` will always fit inside an `u8`."),
+                },
+            ),
         ];
 
         for (return_type, expected_strategy) in cases {

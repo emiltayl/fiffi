@@ -17,6 +17,10 @@ struct CallFrame {
     /// XMM arguments; the first two slots also hold `xmm0` and `xmm1` returns.
     xmm_registers: [Register; 8],
 
+    /// Space required to reserve on the stack. This includes memory required to provide storage
+    /// space for hidden pointer return if we simply want to discard the return value.
+    stack_allocation_len: usize,
+
     stack_buffer_ptr: *const MaybeUninit<u8>,
     stack_buffer_len: usize,
     fn_ptr: FnPtr,
@@ -41,18 +45,34 @@ impl CallFrame {
         let mut call_frame = Self {
             gpr_registers: <[Register; 6] as Default>::default(),
             xmm_registers: <[Register; 8] as Default>::default(),
+            stack_allocation_len: stack_buffer.len(),
             stack_buffer_ptr: ptr::null(),
             stack_buffer_len: stack_buffer.len(),
             fn_ptr,
         };
 
         // The hidden return pointer occupies the first GPR.
-        if marshal_plan.return_strategy == ReturnStrategy::HiddenPointer {
-            let ret_ptr_bytes = ret
-                .map_or(ptr::null_mut(), Ret::as_ptr)
-                .expose_provenance()
-                .to_ne_bytes();
-            call_frame.gpr_registers[0].update_from_bytes(&ret_ptr_bytes);
+        if let ReturnStrategy::HiddenPointer {
+            size: return_size,
+            align_log2: return_align,
+        } = marshal_plan.return_strategy
+        {
+            if let Some(ret) = ret {
+                let ret_ptr_bytes = ret.as_ptr().expose_provenance().to_ne_bytes();
+                call_frame.gpr_registers[0].update_from_bytes(&ret_ptr_bytes);
+            } else {
+                // Reserve extra space for the return value if the caller simply wants to discard
+                // the return value. Add an offset to the reserved space in the first argument
+                // register. `invoke` must calculate the exact address.
+                let return_align = 1usize << return_align;
+
+                let ret_ptr_offset = call_frame
+                    .stack_allocation_len
+                    .next_multiple_of(return_align);
+
+                call_frame.gpr_registers[0].update_from_bytes(&ret_ptr_offset.to_ne_bytes());
+                call_frame.stack_allocation_len = ret_ptr_offset + return_size;
+            }
         }
 
         for step in &marshal_plan.argument_moves {
@@ -113,16 +133,16 @@ fn copy_destination<'frame>(
 unsafe fn write_register_return(
     call_frame: &CallFrame,
     return_strategy: ReturnStrategy,
-    ret: Option<Ret<'_>>,
+    ret: Ret<'_>,
 ) {
-    let ret_ptr = ret.as_ref().map_or(ptr::null_mut(), Ret::as_ptr);
+    let ret_ptr = ret.as_ptr();
     let return_register = |bank: RegisterBank, index: usize| match bank {
         RegisterBank::Gpr => &call_frame.gpr_registers[index],
         RegisterBank::Xmm => &call_frame.xmm_registers[index],
     };
 
     match return_strategy {
-        ReturnStrategy::Void | ReturnStrategy::HiddenPointer => {}
+        ReturnStrategy::Void | ReturnStrategy::HiddenPointer { .. } => {}
         ReturnStrategy::SingleRegister { bank, byte_length } => {
             let register = return_register(bank, 0);
 
@@ -191,11 +211,13 @@ pub(crate) unsafe fn call(
         invoke(&raw mut call_frame);
     }
 
-    // SAFETY:
-    // - `invoke` saved the return registers in the frame.
-    // - The caller supplies valid return storage, disjoint from the frame.
-    unsafe {
-        write_register_return(&call_frame, marshal_plan.return_strategy, ret);
+    if let Some(ret) = ret {
+        // SAFETY:
+        // - `invoke` saved the return registers in the frame.
+        // - The caller supplies valid return storage, disjoint from the frame.
+        unsafe {
+            write_register_return(&call_frame, marshal_plan.return_strategy, ret);
+        }
     }
 }
 
@@ -238,7 +260,7 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         ".seh_endprologue",
 
         "mov r12, rdi",
-        stack_setup_asm!("[r12 + {stack_buffer_len_offset}]"),
+        stack_setup_asm!("[r12 + {stack_allocation_len_offset}]"),
 
         // Copy the stack arguments into the probed allocation.
         "mov rsi, [r12 + {stack_buffer_ptr_offset}]",
@@ -263,6 +285,13 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         "movq xmm6, [r12 + {xmm_registers_offset} + {register_size} * 6]",
         "movq xmm7, [r12 + {xmm_registers_offset} + {register_size} * 7]",
 
+        // Calculate the offset in `rdi` if needed for hidden return pointer.
+        "mov r11, [r12 + {stack_allocation_len_offset}]",
+        "cmp r11, [r12 + {stack_buffer_len_offset}]",
+        "je 20f",
+        "add rdi, rsp",
+
+        "20:",
         "mov r11, [r12 + {fn_ptr_offset}]",
         "call r11",
 
@@ -288,6 +317,7 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         ".seh_endproc",
         #[cfg(windows)]
         __unwind_function = sym invoke,
+        stack_allocation_len_offset = const offset_of!(CallFrame, stack_allocation_len),
         stack_buffer_len_offset = const offset_of!(CallFrame, stack_buffer_len),
         stack_buffer_ptr_offset = const offset_of!(CallFrame, stack_buffer_ptr),
 
@@ -330,6 +360,7 @@ mod tests {
         let mut call_frame = CallFrame {
             gpr_registers: <[Register; 6] as Default>::default(),
             xmm_registers: <[Register; 8] as Default>::default(),
+            stack_allocation_len: 0,
             stack_buffer_ptr: ptr::null(),
             stack_buffer_len: 0,
             fn_ptr: fn_ptrize!(unused_target),
@@ -361,7 +392,7 @@ mod tests {
                 write_register_return(
                     &call_frame,
                     ReturnStrategy::SingleRegister { bank, byte_length },
-                    Some(Ret::new(&mut return_buffer)),
+                    Ret::new(&mut return_buffer),
                 );
             }
 
@@ -397,7 +428,7 @@ mod tests {
                         second_bank: bank,
                         second_byte_length: 5,
                     },
-                    Some(Ret::new(&mut return_buffer)),
+                    Ret::new(&mut return_buffer),
                 );
             }
 
@@ -440,7 +471,7 @@ mod tests {
                         second_bank,
                         second_byte_length: 6,
                     },
-                    Some(Ret::new(&mut return_buffer)),
+                    Ret::new(&mut return_buffer),
                 );
             }
 
@@ -455,19 +486,17 @@ mod tests {
     fn non_register_returns_do_not_write_return_storage() {
         let call_frame = synthetic_return_frame();
 
-        // SAFETY: A void strategy does not access return storage or any register slot.
-        unsafe {
-            write_register_return(&call_frame, ReturnStrategy::Void, None);
-        }
-
         let mut return_buffer = [MaybeUninit::new(RETURN_SENTINEL); 16];
 
         // SAFETY: A hidden-pointer strategy does not access return storage or any register slot.
         unsafe {
             write_register_return(
                 &call_frame,
-                ReturnStrategy::HiddenPointer,
-                Some(Ret::new(&mut return_buffer)),
+                ReturnStrategy::HiddenPointer {
+                    size: 0,
+                    align_log2: 0,
+                },
+                Ret::new(&mut return_buffer),
             );
         }
 
@@ -627,6 +656,7 @@ mod tests {
         let mut call_frame = CallFrame {
             gpr_registers: <[Register; 6] as Default>::default(),
             xmm_registers: <[Register; 8] as Default>::default(),
+            stack_allocation_len: 0,
             stack_buffer_ptr: ptr::null(),
             stack_buffer_len: 0,
             fn_ptr: fn_ptrize!(unused_target),

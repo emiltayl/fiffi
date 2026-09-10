@@ -32,7 +32,7 @@ impl MarshalPlan {
         let mut register_allocator = RegisterSlotAllocator::default();
 
         // Reserve the first slot for a hidden return pointer if needed.
-        if return_strategy == ReturnStrategy::HiddenPointer {
+        if matches!(return_strategy, ReturnStrategy::HiddenPointer { .. }) {
             register_allocator.allocate();
         }
 
@@ -207,13 +207,17 @@ pub(super) enum ArgumentMove {
 }
 
 /// Describes how a function returns its value.
+#[expect(
+    variant_size_differences,
+    reason = "Return type layout must be stored to support discarding return values."
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ReturnStrategy {
     /// The function does not return a value.
     Void,
 
     /// Writes the result through a hidden first argument.
-    HiddenPointer,
+    HiddenPointer { size: usize, align_log2: u8 },
 
     /// Returns `byte_length` low bytes in `rax`.
     Rax { byte_length: u8 },
@@ -233,7 +237,14 @@ impl ReturnStrategy {
         }
 
         match ValueClass::classify(return_type) {
-            ValueClass::Indirect => Self::HiddenPointer,
+            ValueClass::Indirect => {
+                let return_layout = return_type.layout();
+                Self::HiddenPointer {
+                    size: return_layout.size,
+                    align_log2: u8::try_from(return_layout.align.trailing_zeros())
+                        .expect("`usize::trailing_zeros` will always fit inside an `u8`."),
+                }
+            }
             ValueClass::Integer => {
                 let byte_length = u8::try_from(return_type.layout().size)
                     .expect("values returned in rax cannot exceed eight bytes");
@@ -355,6 +366,7 @@ mod tests {
     #[test]
     fn hidden_return_pointer_shifts_every_argument_position() {
         let return_type = U64x3::ffi_type();
+        let return_layout = return_type.layout();
         let plan = MarshalPlan::build(
             &[Type::U64, Type::F64, Type::U64, Type::F32],
             Some(&return_type),
@@ -373,7 +385,11 @@ mod tests {
                 indirect_register_mask: 0,
                 indirect_stack_offsets: alloc::vec![].into_boxed_slice(),
                 stack_buffer_size: 8,
-                return_strategy: ReturnStrategy::HiddenPointer,
+                return_strategy: ReturnStrategy::HiddenPointer {
+                    size: return_layout.size,
+                    align_log2: u8::try_from(return_layout.align.trailing_zeros())
+                        .expect("`usize::trailing_zeros` will always fit inside an `u8`."),
+                },
             }
         );
     }
