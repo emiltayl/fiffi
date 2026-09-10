@@ -136,6 +136,51 @@ macro_rules! unwind_tests_for_abi {
             }
 
             #[test]
+            fn discard_return_unwinds_and_cleans_up() {
+                use crate::function::Function;
+                use crate::types::Type;
+
+                const LENGTH: usize = 3 * 4096 + 1;
+
+                #[repr(C)]
+                struct LargeReturn {
+                    bytes: [u8; LENGTH],
+                }
+
+                extern $extern_abi fn unwind_callback() -> LargeReturn {
+                    panic_any(UnwindMarker);
+                }
+
+                extern $extern_abi fn identity_callback(value: usize) -> usize {
+                    value
+                }
+
+                let return_type = Type::create_struct(vec![Type::U8; LENGTH]).unwrap();
+                let function = Function::with_abi(
+                    crate::fn_ptrize!(unwind_callback),
+                    &[],
+                    Some(&return_type),
+                    $abi,
+                );
+                let guard_dropped = AtomicBool::new(false);
+                let result = catch_unwind(|| {
+                    let _guard = DropGuard(&guard_dropped);
+                    // SAFETY: The signature matches `unwind_callback`, the ABI permits
+                    // unwinding, and `None` requests discard storage for its return type.
+                    unsafe { function.call(&[], None); }
+                });
+
+                assert_unwind_marker(result);
+                assert!(guard_dropped.load(Ordering::Relaxed));
+
+                let result = call_ffi_fn!(
+                    abi: $abi,
+                    identity_callback(usize = 42) -> usize
+                );
+                assert_eq!(result, 42);
+            }
+
+            #[test]
             fn panic_unwinds_through_nested_calls() {
                 extern $extern_abi fn inner_callback() {
                     panic_any(UnwindMarker);

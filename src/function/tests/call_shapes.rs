@@ -53,6 +53,127 @@ macro_rules! call_shape_tests_for_abi {
                 assert_eq!(output.bytes, input.bytes.map(|byte| byte ^ 0xff));
             }
 
+            #[test]
+            fn discard_return_with_mixed_arguments_and_plan_reuse() {
+                use core::mem::MaybeUninit;
+                use core::ptr;
+
+                use crate::function::{Function, arg, ret};
+                use crate::test_utils::structs::{U128X2_ARG, U128x2};
+                use crate::types::{FfiType, Type};
+
+                unsafe extern $extern_abi fn test_callback(
+                    first: U128x2,
+                    call_count: *mut usize,
+                    float: f64,
+                    integer_1: usize,
+                    integer_2: usize,
+                    integer_3: usize,
+                    integer_4: usize,
+                    last: U8x3,
+                ) -> U128x2 {
+                    assert_eq!(first, U128X2_ARG);
+                    assert_eq!(float, 3.5);
+                    assert_eq!([integer_1, integer_2, integer_3, integer_4], [11, 22, 33, 44]);
+                    assert_eq!(last, U8X3_ARG);
+
+                    // SAFETY: The test supplies a pointer to its initialized, writable counter.
+                    unsafe { *call_count += 1; }
+                    first
+                }
+
+                // Both ABIs need padding after the stack argument storage to align the hidden
+                // return buffer to 16 bytes. Win64 also passes indirect arguments in a register
+                // and on the stack alongside the hidden return pointer.
+                let function = Function::with_abi(
+                    crate::fn_ptrize!(test_callback),
+                    &[
+                        U128x2::ffi_type(), Type::Pointer, Type::F64,
+                        Type::Usize, Type::Usize, Type::Usize, Type::Usize,
+                        U8x3::ffi_type(),
+                    ],
+                    Some(&U128x2::ffi_type()),
+                    $abi,
+                );
+                let mut call_count = 0usize;
+                let call_count_pointer = ptr::from_mut(&mut call_count);
+                let args = [
+                    arg(&U128X2_ARG), arg(&call_count_pointer), arg(&3.5f64),
+                    arg(&11usize), arg(&22usize), arg(&33usize), arg(&44usize),
+                    arg(&U8X3_ARG),
+                ];
+
+                for expected_count in 1..=32 {
+                    if expected_count % 2 == 0 {
+                        let mut result = MaybeUninit::<U128x2>::uninit();
+                        // SAFETY: The ABI, signature, and live argument/return storage match
+                        // `test_callback`, and the counter remains writable.
+                        unsafe { function.call(&args, Some(ret(&mut result))); }
+                        // SAFETY: The successful call initialized the complete return value.
+                        assert_eq!(unsafe { result.assume_init() }, U128X2_ARG);
+                    } else {
+                        // SAFETY: The ABI, signature, and arguments match `test_callback`, and
+                        // the counter remains writable. `None` discards the result.
+                        unsafe { function.call(&args, None); }
+                    }
+                    assert_eq!(call_count, expected_count);
+                }
+            }
+
+            #[test]
+            fn discard_return_spanning_multiple_stack_pages() {
+                use core::mem::MaybeUninit;
+                use core::ptr;
+
+                use crate::function::{Function, arg, ret};
+                use crate::types::Type;
+
+                const LENGTH: usize = 3 * 4096 + 1;
+
+                #[repr(C)]
+                struct LargeReturn {
+                    bytes: [u8; LENGTH],
+                }
+
+                unsafe extern $extern_abi fn test_callback(call_count: *mut usize) -> LargeReturn {
+                    // SAFETY: The test supplies a pointer to its initialized, writable counter.
+                    unsafe { *call_count += 1; }
+                    LargeReturn {
+                        bytes: core::array::from_fn(|index| u8::try_from(index % 251).unwrap()),
+                    }
+                }
+
+                let return_type = Type::create_struct(vec![Type::U8; LENGTH]).unwrap();
+                // Only discard storage requires a large outgoing stack allocation here.
+                let function = Function::with_abi(
+                    crate::fn_ptrize!(test_callback),
+                    &[Type::Pointer],
+                    Some(&return_type),
+                    $abi,
+                );
+                let mut call_count = 0usize;
+                let call_count_pointer = ptr::from_mut(&mut call_count);
+                let args = [arg(&call_count_pointer)];
+
+                for _ in 0..16 {
+                    // SAFETY: The ABI and signature match `test_callback`, and the counter
+                    // remains initialized and writable. `None` discards the result.
+                    unsafe { function.call(&args, None); }
+                }
+                assert_eq!(call_count, 16);
+
+                let mut result = MaybeUninit::<LargeReturn>::uninit();
+                // SAFETY: The ABI, signature, and live argument/return storage match
+                // `test_callback`, and the counter remains writable.
+                unsafe { function.call(&args, Some(ret(&mut result))); }
+                assert_eq!(call_count, 17);
+                // SAFETY: The successful call initialized the complete return value.
+                let result = unsafe { result.assume_init() };
+                for (index, &byte) in result.bytes.iter().enumerate() {
+                    assert_eq!(byte, u8::try_from(index % 251).unwrap(), "return byte {index}");
+                }
+            }
+
             #[rustfmt::skip]
             #[test]
             fn sixteen_i32_arguments_return_normally() {
