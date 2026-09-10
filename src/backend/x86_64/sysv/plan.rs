@@ -4,7 +4,7 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use super::classification::ValueClass;
-use crate::types::Type;
+use crate::types::{LayoutNode, Type};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MarshalPlan {
@@ -25,7 +25,9 @@ impl MarshalPlan {
         let mut argument_moves = Vec::with_capacity(argument_types.len());
         let mut stack_buffer_size: usize = 0;
 
-        let return_strategy = ReturnStrategy::for_return_type(return_type);
+        let mut classification_scratch = Vec::new();
+        let return_strategy =
+            ReturnStrategy::for_return_type(return_type, &mut classification_scratch);
 
         // Reserve the first GPR for the hidden return pointer if needed.
         if matches!(return_strategy, ReturnStrategy::HiddenPointer { .. }) {
@@ -34,7 +36,8 @@ impl MarshalPlan {
 
         for (argument_index, argument) in argument_types.iter().enumerate() {
             let argument_layout = argument.layout();
-            let argument_class = ValueClass::classify(argument, &argument_layout);
+            let argument_class =
+                ValueClass::classify(argument, &argument_layout, &mut classification_scratch);
 
             let allocation = RegisterRequirements::for_value_class(argument_class)
                 .and_then(|requirements| register_allocator.allocate(requirements));
@@ -187,7 +190,10 @@ pub(super) enum ReturnStrategy {
 }
 
 impl ReturnStrategy {
-    fn for_return_type(return_type: Option<&Type>) -> Self {
+    fn for_return_type<'ty>(
+        return_type: Option<&'ty Type>,
+        scratch: &mut Vec<LayoutNode<'ty>>,
+    ) -> Self {
         let Some(return_type) = return_type else {
             return Self::Void;
         };
@@ -195,7 +201,7 @@ impl ReturnStrategy {
         let return_layout = return_type.layout();
 
         let Some(register_requirements) = RegisterRequirements::for_value_class(
-            ValueClass::classify(return_type, &return_layout),
+            ValueClass::classify(return_type, &return_layout, scratch),
         ) else {
             return Self::HiddenPointer {
                 size: return_layout.size,
@@ -204,8 +210,8 @@ impl ReturnStrategy {
             };
         };
 
-        let byte_length = u8::try_from(return_type.layout().size)
-            .expect("register return types cannot exceed 16 bytes");
+        let byte_length =
+            u8::try_from(return_layout.size).expect("register return types cannot exceed 16 bytes");
 
         match register_requirements {
             RegisterRequirements::One(bank) => Self::SingleRegister { bank, byte_length },
@@ -605,6 +611,33 @@ mod tests {
         ];
 
         assert_marshal_plan(&argument_types, None, &expected_moves, 0);
+    }
+
+    #[test]
+    fn nested_boundary_crossing_values_plan_returns_and_mixed_arguments() {
+        let return_type = struct_type(&[Type::F32, struct_type(&[Type::U32, Type::F32])]);
+        let argument_types = [
+            return_type.clone(),
+            Type::U64,
+            Type::create_struct(vec![Type::U8; 17]).unwrap(),
+            struct_type(&[Type::F64]),
+        ];
+        let expected_moves = [
+            ExpectedMove::eightbyte(0, 0, 8, ExpectedLocation::Gpr(0)),
+            ExpectedMove::eightbyte(0, 8, 4, ExpectedLocation::Xmm(0)),
+            ExpectedMove::whole_argument(&argument_types, 1, ExpectedLocation::Gpr(1)),
+            ExpectedMove::whole_argument(&argument_types, 2, ExpectedLocation::Stack(0)),
+            ExpectedMove::whole_argument(&argument_types, 3, ExpectedLocation::Xmm(1)),
+        ];
+        assert_marshal_plan(&argument_types, Some(&return_type), &expected_moves, 24);
+        assert_eq!(
+            MarshalPlan::build(&argument_types, Some(&return_type)).return_strategy,
+            ReturnStrategy::TwoRegisters {
+                first_bank: RegisterBank::Gpr,
+                second_bank: RegisterBank::Xmm,
+                second_byte_length: 4,
+            },
+        );
     }
 
     #[test]

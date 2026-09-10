@@ -1,4 +1,9 @@
-use crate::types::{FfiTypeLayout, Type};
+extern crate alloc;
+
+#[cfg(not(test))]
+use alloc::vec::Vec;
+
+use crate::types::{FfiTypeLayout, LayoutNode, Type};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ValueClass {
@@ -12,17 +17,55 @@ pub(super) enum ValueClass {
 }
 
 impl ValueClass {
-    pub(super) fn classify(ty: &Type, layout: &FfiTypeLayout) -> Self {
+    pub(super) fn classify<'ty>(
+        ty: &'ty Type,
+        layout: &FfiTypeLayout,
+        scratch: &mut Vec<LayoutNode<'ty>>,
+    ) -> Self {
         if layout.size > 16 {
+            scratch.clear();
             return Self::Memory;
         }
 
         let mut eightbyte_classes = [EightbyteClass::NoClass; 2];
-        Self::classify_into_eightbytes(ty, 0, &mut eightbyte_classes);
+        if matches!(ty, Type::Struct(_) | Type::Union(_)) {
+            ty.layout_nodes_into(scratch);
+            debug_assert_eq!(scratch[0].layout, *layout);
+            Self::classify_into_eightbytes(scratch, 0, 0, &mut eightbyte_classes);
+        } else {
+            scratch.clear();
+            Self::classify_scalar_into_eightbytes(ty, 0, &mut eightbyte_classes);
+        }
         Self::from_eightbyte_classes(eightbyte_classes)
     }
 
     fn classify_into_eightbytes(
+        nodes: &[LayoutNode<'_>],
+        node_index: usize,
+        base_offset: usize,
+        eightbyte_classes: &mut [EightbyteClass; 2],
+    ) {
+        let node = &nodes[node_index];
+        match node.ty {
+            Type::Struct(_) | Type::Union(_) => {
+                let mut child_index = node_index + 1;
+                while child_index < node.subtree_end {
+                    let child = &nodes[child_index];
+                    Self::classify_into_eightbytes(
+                        nodes,
+                        child_index,
+                        base_offset + child.offset_in_parent,
+                        eightbyte_classes,
+                    );
+                    // Skip the already-classified subtree directly to the next sibling.
+                    child_index = child.subtree_end;
+                }
+            }
+            _ => Self::classify_scalar_into_eightbytes(node.ty, base_offset, eightbyte_classes),
+        }
+    }
+
+    fn classify_scalar_into_eightbytes(
         ty: &Type,
         base_offset: usize,
         eightbyte_classes: &mut [EightbyteClass; 2],
@@ -52,21 +95,8 @@ impl ValueClass {
                 eightbyte_classes[0] = EightbyteClass::Integer;
                 eightbyte_classes[1] = EightbyteClass::Integer;
             }
-            Type::Struct(fields) => {
-                let field_offsets = ty.field_offsets();
-                for (field_ty, field_offset) in fields.as_slice().iter().zip(field_offsets.iter()) {
-                    Self::classify_into_eightbytes(
-                        field_ty,
-                        base_offset + *field_offset,
-                        eightbyte_classes,
-                    );
-                }
-            }
-
-            Type::Union(variants) => {
-                for variant_ty in variants.as_slice() {
-                    Self::classify_into_eightbytes(variant_ty, base_offset, eightbyte_classes);
-                }
+            Type::Struct(_) | Type::Union(_) => {
+                unreachable!("aggregates are classified using prepared layout nodes");
             }
         }
     }
@@ -118,11 +148,12 @@ mod tests {
     };
     use crate::types::FfiType;
 
+    fn classify(ty: &Type) -> ValueClass {
+        ValueClass::classify(ty, &ty.layout(), &mut Vec::new())
+    }
+
     fn assert_ffi_class<T: FfiType>(expected: ValueClass) {
-        assert_eq!(
-            ValueClass::classify(&T::ffi_type(), &T::ffi_type().layout()),
-            expected
-        );
+        assert_eq!(classify(&T::ffi_type()), expected);
     }
 
     #[test]
@@ -145,8 +176,13 @@ mod tests {
             (Type::U128, ValueClass::IntegerInteger),
         ];
 
-        for (ty, expected) in cases {
-            assert_eq!(ValueClass::classify(&ty, &ty.layout()), expected);
+        let mut scratch = Vec::new();
+        for (ty, expected) in &cases {
+            assert_eq!(
+                ValueClass::classify(ty, &ty.layout(), &mut scratch),
+                *expected
+            );
+            assert_eq!(scratch.capacity(), 0);
         }
     }
 
@@ -213,44 +249,117 @@ mod tests {
     fn synthetic_union_classification() {
         let one_floating_eightbyte =
             Type::create_union_from_slice(&[Type::F32, Type::F64]).unwrap();
-        assert_eq!(
-            ValueClass::classify(&one_floating_eightbyte, &one_floating_eightbyte.layout()),
-            ValueClass::Sse,
-        );
+        assert_eq!(classify(&one_floating_eightbyte), ValueClass::Sse);
 
         let first_sse_second_integer =
             Type::create_union_from_slice(&[F64U64::ffi_type(), F64x2::ffi_type()]).unwrap();
-        assert_eq!(
-            ValueClass::classify(
-                &first_sse_second_integer,
-                &first_sse_second_integer.layout()
-            ),
-            ValueClass::SseInteger,
-        );
+        assert_eq!(classify(&first_sse_second_integer), ValueClass::SseInteger);
 
         for variants in [[Type::F32, Type::U32], [Type::U32, Type::F32]] {
             let integer_dominates = Type::create_union_from_slice(&variants).unwrap();
-            assert_eq!(
-                ValueClass::classify(&integer_dominates, &integer_dominates.layout()),
-                ValueClass::Integer,
-            );
+            assert_eq!(classify(&integer_dominates), ValueClass::Integer);
         }
 
         let floating_union = Type::create_union_from_slice(&[Type::F64]).unwrap();
         let union_at_nonzero_offset =
             Type::create_struct_from_slice(&[Type::U64, floating_union]).unwrap();
-        assert_eq!(
-            ValueClass::classify(&union_at_nonzero_offset, &union_at_nonzero_offset.layout()),
-            ValueClass::IntegerSse,
-        );
+        assert_eq!(classify(&union_at_nonzero_offset), ValueClass::IntegerSse);
 
         let floating_union = Type::create_union_from_slice(&[Type::F64]).unwrap();
         let union_before_integer =
             Type::create_struct_from_slice(&[floating_union, Type::U64]).unwrap();
+        assert_eq!(classify(&union_before_integer), ValueClass::SseInteger);
+    }
+
+    #[test]
+    fn nested_fields_crossing_an_eightbyte_keep_their_scalar_classes() {
+        let inner = Type::create_struct(vec![Type::U32, Type::F32]).unwrap();
+        assert_eq!(classify(&inner), ValueClass::Integer);
+        let outer = Type::create_struct(vec![Type::F32, inner]).unwrap();
+        assert_eq!(classify(&outer), ValueClass::IntegerSse);
+    }
+
+    #[test]
+    fn aggregates_at_the_size_cutoff_only_prepare_register_values() {
+        let sixteen_bytes = Type::create_struct(vec![Type::U8; 16]).unwrap();
+        let seventeen_bytes = Type::create_struct(vec![Type::U8; 17]).unwrap();
+        let large_union = Type::create_union(vec![seventeen_bytes.clone(), Type::U128]).unwrap();
+        let cases = [
+            (&sixteen_bytes, 16, ValueClass::IntegerInteger),
+            (&seventeen_bytes, 17, ValueClass::Memory),
+            (&large_union, 32, ValueClass::Memory),
+        ];
+
+        for (ty, size, expected) in cases {
+            let layout = ty.layout();
+            assert_eq!(layout.size, size);
+            let mut scratch = Vec::new();
+            assert_eq!(ValueClass::classify(ty, &layout, &mut scratch), expected);
+            assert_eq!(scratch.capacity() > 0, size <= 16);
+        }
+    }
+
+    #[test]
+    fn deeply_nested_wrappers_preserve_layout_and_classification() {
+        for depth in [32, 64, 128] {
+            let mut ty = Type::F64;
+            for _ in 0..depth {
+                ty = Type::create_struct(vec![ty]).unwrap();
+            }
+
+            let layout = ty.layout();
+            assert_eq!(layout, Type::F64.layout());
+            let mut scratch = Vec::new();
+            assert_eq!(
+                ValueClass::classify(&ty, &layout, &mut scratch),
+                ValueClass::Sse,
+            );
+            assert_eq!(scratch.len(), depth + 1);
+            for node in &scratch {
+                assert_eq!(node.layout, layout);
+                assert_eq!(node.offset_in_parent, 0);
+                assert_eq!(node.subtree_end, scratch.len());
+            }
+        }
+    }
+
+    #[test]
+    fn scratch_is_cleared_and_reused_across_different_value_shapes() {
+        let return_type = Type::create_struct(vec![
+            Type::F32,
+            Type::create_struct(vec![Type::U32, Type::F32]).unwrap(),
+        ])
+        .unwrap();
+        let argument_types = [
+            Type::U64,
+            Type::create_struct(vec![Type::U8; 17]).unwrap(),
+            Type::create_union(vec![Type::F32, Type::F64]).unwrap(),
+            Type::create_struct(vec![Type::U8]).unwrap(),
+        ];
+        let mut scratch = Vec::new();
         assert_eq!(
-            ValueClass::classify(&union_before_integer, &union_before_integer.layout()),
-            ValueClass::SseInteger,
+            ValueClass::classify(&return_type, &return_type.layout(), &mut scratch),
+            ValueClass::IntegerSse,
         );
+        let capacity = scratch.capacity();
+        let pointer = scratch.as_ptr();
+        let expected = [
+            (ValueClass::Integer, 0),
+            (ValueClass::Memory, 0),
+            (ValueClass::Sse, 3),
+            (ValueClass::Integer, 2),
+        ];
+
+        for (ty, (class, node_count)) in argument_types.iter().zip(expected) {
+            assert_eq!(ValueClass::classify(ty, &ty.layout(), &mut scratch), class);
+            assert_eq!(scratch.capacity(), capacity);
+            assert_eq!(scratch.as_ptr(), pointer);
+            assert_eq!(scratch.len(), node_count);
+            if node_count != 0 {
+                assert!(core::ptr::eq(scratch[0].ty, ty));
+                assert_eq!(scratch[0].subtree_end, node_count);
+            }
+        }
     }
 
     #[test]
