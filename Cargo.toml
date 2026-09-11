@@ -2,7 +2,7 @@
 name = "fiffi"
 version = "0.1.2"
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.99"
 categories = ["no-std", "development-tools::ffi"]
 description = "Rust bindings for libffi, alternative to libffi-rs"
 keywords = ["ffi", "libffi", "abi", "closure"]

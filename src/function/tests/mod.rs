@@ -5,14 +5,20 @@ mod pass_by_value;
 mod register_passing;
 mod single_value;
 mod unwind;
+mod variadic;
 
 use crate::function::{Function, arg, ret};
 use crate::types::Type;
 
 #[test]
 fn default_abi_matches_extern_c() {
-
-    extern "C" fn default_abi_fn(int_1: u32, float_1: f64, int_2: u32, float_2: f64, int_3: u32,) -> f64 {
+    extern "C" fn default_abi_fn(
+        int_1: u32,
+        float_1: f64,
+        int_2: u32,
+        float_2: f64,
+        int_3: u32,
+    ) -> f64 {
         f64::from(int_1)
             + 2.0 * float_1
             + 3.0 * f64::from(int_2)

@@ -151,9 +151,13 @@ pub enum VariadicType {
     U64,
 
     /// Signed 128-bit integer
+    ///
+    /// TODO note not tested by test suite at the moment
     I128,
 
     /// Unsigned 128-bit integer
+    ///
+    /// TODO note not tested by test suite at the moment
     U128,
 
     /// Signed pointer-sized integer
@@ -173,6 +177,8 @@ pub enum VariadicType {
     /// A `VariadicType::Struct` must be created using [`VariadicType::create_struct`] or
     /// [`VariadicType::create_struct_from_slice`]. This ensures that the struct is not empty, as
     /// empty structs are not supported by fiffi.
+    ///
+    /// TODO note not tested by test suite at the moment
     Struct(internal::NonEmptyVec),
 
     /// C-compatible union with at least one variant.
@@ -180,6 +186,8 @@ pub enum VariadicType {
     /// A `VariadicType::Union` must be created using [`VariadicType::create_union`] or
     /// [`VariadicType::create_union_from_slice`]. This ensures that the union is not empty, as
     /// empty unions are not supported by fiffi.
+    ///
+    /// TODO note not tested by test suite at the moment
     Union(internal::NonEmptyVec),
 }
 
