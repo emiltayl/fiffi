@@ -7,10 +7,11 @@ mod win64;
 use core::mem::MaybeUninit;
 
 use crate::FnPtr;
+use crate::backend::CallSignature;
 use crate::function::{Arg, Ret};
-use crate::types::Type;
+use crate::types::{Type, VariadicType};
 
-/// ABI constants for 64-bit x86 targets.
+/// ABIs supported on 64-bit x86 targets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum Abi {
@@ -29,6 +30,28 @@ impl Abi {
     pub const ABIS: [Self; 2] = [Self::SysV, Self::Win64];
 }
 
+/// ABIs with support for variadic calls on 64-bit x86 targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum VariadicAbi {
+    /// System V calling convention for `x86_64`.
+    #[cfg_attr(not(any(windows, target_os = "uefi")), default)]
+    SysV,
+    /// Microsoft Windows calling convention for `x86_64`.
+    // TODO note typically no floats for UEFI
+    #[cfg_attr(any(windows, target_os = "uefi"), default)]
+    Win64,
+}
+
+impl From<VariadicAbi> for Abi {
+    fn from(abi: VariadicAbi) -> Self {
+        match abi {
+            VariadicAbi::SysV => Abi::SysV,
+            VariadicAbi::Win64 => Abi::Win64,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum CallInterface {
     SysV(sysv::MarshalPlan),
@@ -37,9 +60,24 @@ pub(crate) enum CallInterface {
 
 impl CallInterface {
     pub(crate) fn new(argument_types: &[Type], return_type: Option<&Type>, abi: Abi) -> Self {
+        let signature = CallSignature::new(argument_types, return_type);
         match abi {
-            Abi::SysV => Self::SysV(sysv::MarshalPlan::build(argument_types, return_type)),
-            Abi::Win64 => Self::Win64(win64::MarshalPlan::build(argument_types, return_type)),
+            Abi::SysV => Self::SysV(sysv::MarshalPlan::build(signature)),
+            Abi::Win64 => Self::Win64(win64::MarshalPlan::build(signature)),
+        }
+    }
+
+    pub(crate) fn variadic(
+        argument_types: &[Type],
+        variadic_argument_types: &[VariadicType],
+        return_type: Option<&Type>,
+        abi: VariadicAbi,
+    ) -> Self {
+        let signature =
+            CallSignature::variadic(argument_types, variadic_argument_types, return_type);
+        match abi {
+            VariadicAbi::SysV => Self::SysV(sysv::MarshalPlan::build(signature)),
+            VariadicAbi::Win64 => Self::Win64(win64::MarshalPlan::build(signature)),
         }
     }
 

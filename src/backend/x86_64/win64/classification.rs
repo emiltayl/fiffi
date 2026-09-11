@@ -1,4 +1,4 @@
-use crate::types::{FfiTypeLayout, Type};
+use crate::types::{FfiTypeLayout, ScalarType, TypeRef};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ValueClass {
@@ -11,22 +11,24 @@ pub(super) enum ValueClass {
 }
 
 impl ValueClass {
-    pub(super) fn classify(ty: &Type, layout: &FfiTypeLayout) -> Self {
+    pub(super) fn classify(ty: TypeRef<'_>, layout: &FfiTypeLayout) -> Self {
         match ty {
-            Type::I128 | Type::U128 => Self::Indirect,
-            Type::F32 | Type::F64 => Self::Xmm,
-            Type::I8
-            | Type::U8
-            | Type::I16
-            | Type::U16
-            | Type::I32
-            | Type::U32
-            | Type::I64
-            | Type::U64
-            | Type::Isize
-            | Type::Usize
-            | Type::Pointer => Self::Integer,
-            Type::Struct(_) | Type::Union(_) => {
+            TypeRef::Scalar(scalar) => match scalar {
+                ScalarType::I128 | ScalarType::U128 => Self::Indirect,
+                ScalarType::F32 | ScalarType::F64 => Self::Xmm,
+                ScalarType::I8
+                | ScalarType::U8
+                | ScalarType::I16
+                | ScalarType::U16
+                | ScalarType::I32
+                | ScalarType::U32
+                | ScalarType::I64
+                | ScalarType::U64
+                | ScalarType::Isize
+                | ScalarType::Usize
+                | ScalarType::Pointer => Self::Integer,
+            },
+            TypeRef::Struct(_) | TypeRef::Union(_) => {
                 if matches!(layout.size, 1 | 2 | 4 | 8) {
                     Self::Integer
                 } else {

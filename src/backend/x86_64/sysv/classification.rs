@@ -3,7 +3,7 @@ extern crate alloc;
 #[cfg(not(test))]
 use alloc::vec::Vec;
 
-use crate::types::{FfiTypeLayout, LayoutNode, Type};
+use crate::types::{FfiTypeLayout, LayoutNode, ScalarType, TypeRef};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ValueClass {
@@ -18,7 +18,7 @@ pub(super) enum ValueClass {
 
 impl ValueClass {
     pub(super) fn classify<'ty>(
-        ty: &'ty Type,
+        ty: TypeRef<'ty>,
         layout: &FfiTypeLayout,
         scratch: &mut Vec<LayoutNode<'ty>>,
     ) -> Self {
@@ -28,13 +28,16 @@ impl ValueClass {
         }
 
         let mut eightbyte_classes = [EightbyteClass::NoClass; 2];
-        if matches!(ty, Type::Struct(_) | Type::Union(_)) {
-            ty.layout_nodes_into(scratch);
-            debug_assert_eq!(scratch[0].layout, *layout);
-            Self::classify_into_eightbytes(scratch, 0, 0, &mut eightbyte_classes);
-        } else {
-            scratch.clear();
-            Self::classify_scalar_into_eightbytes(ty, 0, &mut eightbyte_classes);
+        match ty {
+            TypeRef::Struct(_) | TypeRef::Union(_) => {
+                ty.layout_nodes_into(scratch);
+                debug_assert_eq!(scratch[0].layout, *layout);
+                Self::classify_into_eightbytes(scratch, 0, 0, &mut eightbyte_classes);
+            }
+            TypeRef::Scalar(scalar) => {
+                scratch.clear();
+                Self::classify_scalar_into_eightbytes(scalar, 0, &mut eightbyte_classes);
+            }
         }
         Self::from_eightbyte_classes(eightbyte_classes)
     }
@@ -47,7 +50,7 @@ impl ValueClass {
     ) {
         let node = &nodes[node_index];
         match node.ty {
-            Type::Struct(_) | Type::Union(_) => {
+            TypeRef::Struct(_) | TypeRef::Union(_) => {
                 let mut child_index = node_index + 1;
                 while child_index < node.subtree_end {
                     let child = &nodes[child_index];
@@ -61,12 +64,14 @@ impl ValueClass {
                     child_index = child.subtree_end;
                 }
             }
-            _ => Self::classify_scalar_into_eightbytes(node.ty, base_offset, eightbyte_classes),
+            TypeRef::Scalar(scalar) => {
+                Self::classify_scalar_into_eightbytes(scalar, base_offset, eightbyte_classes);
+            }
         }
     }
 
     fn classify_scalar_into_eightbytes(
-        ty: &Type,
+        ty: ScalarType,
         base_offset: usize,
         eightbyte_classes: &mut [EightbyteClass; 2],
     ) {
@@ -74,29 +79,26 @@ impl ValueClass {
         let eightbyte_index = base_offset / 8;
 
         match ty {
-            Type::I8
-            | Type::U8
-            | Type::I16
-            | Type::U16
-            | Type::I32
-            | Type::U32
-            | Type::I64
-            | Type::U64
-            | Type::Isize
-            | Type::Usize
-            | Type::Pointer => {
+            ScalarType::I8
+            | ScalarType::U8
+            | ScalarType::I16
+            | ScalarType::U16
+            | ScalarType::I32
+            | ScalarType::U32
+            | ScalarType::I64
+            | ScalarType::U64
+            | ScalarType::Isize
+            | ScalarType::Usize
+            | ScalarType::Pointer => {
                 eightbyte_classes[eightbyte_index].merge_with(EightbyteClass::Integer);
             }
-            Type::F32 | Type::F64 => {
+            ScalarType::F32 | ScalarType::F64 => {
                 eightbyte_classes[eightbyte_index].merge_with(EightbyteClass::Sse);
             }
-            Type::I128 | Type::U128 => {
+            ScalarType::I128 | ScalarType::U128 => {
                 debug_assert_eq!(base_offset, 0);
                 eightbyte_classes[0] = EightbyteClass::Integer;
                 eightbyte_classes[1] = EightbyteClass::Integer;
-            }
-            Type::Struct(_) | Type::Union(_) => {
-                unreachable!("aggregates are classified using prepared layout nodes");
             }
         }
     }
@@ -135,6 +137,7 @@ impl EightbyteClass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::CallSignature;
     use crate::test_utils::structs::{
         F32x2, F32x3U32, F64U64, F64x2, NestedF32x2x2, NestedF64x2x2, NestedU8U32x2, NestedU8U64x2,
         NestedU8UnionU64F64, NestedU8UnionU128U8, NestedUnionU8U128U8, NestedUnionU32F32,
@@ -146,10 +149,10 @@ mod tests {
         UnionNestedU64x2, UnionNestedU64x4F64x4, UnionU8U128, UnionU32F32, UnionU64F64, UnionU128,
         UnionU128U8,
     };
-    use crate::types::FfiType;
+    use crate::types::{FfiType, Type, VariadicType};
 
     fn classify(ty: &Type) -> ValueClass {
-        ValueClass::classify(ty, &ty.layout(), &mut Vec::new())
+        ValueClass::classify(TypeRef::from(ty), &ty.layout(), &mut Vec::new())
     }
 
     fn assert_ffi_class<T: FfiType>(expected: ValueClass) {
@@ -179,7 +182,7 @@ mod tests {
         let mut scratch = Vec::new();
         for (ty, expected) in &cases {
             assert_eq!(
-                ValueClass::classify(ty, &ty.layout(), &mut scratch),
+                ValueClass::classify(TypeRef::from(ty), &ty.layout(), &mut scratch),
                 *expected
             );
             assert_eq!(scratch.capacity(), 0);
@@ -294,7 +297,10 @@ mod tests {
             let layout = ty.layout();
             assert_eq!(layout.size, size);
             let mut scratch = Vec::new();
-            assert_eq!(ValueClass::classify(ty, &layout, &mut scratch), expected);
+            assert_eq!(
+                ValueClass::classify(TypeRef::from(ty), &layout, &mut scratch),
+                expected
+            );
             assert_eq!(scratch.capacity() > 0, size <= 16);
         }
     }
@@ -311,7 +317,7 @@ mod tests {
             assert_eq!(layout, Type::F64.layout());
             let mut scratch = Vec::new();
             assert_eq!(
-                ValueClass::classify(&ty, &layout, &mut scratch),
+                ValueClass::classify(TypeRef::from(&ty), &layout, &mut scratch),
                 ValueClass::Sse,
             );
             assert_eq!(scratch.len(), depth + 1);
@@ -330,15 +336,18 @@ mod tests {
             Type::create_struct(vec![Type::U32, Type::F32]).unwrap(),
         ])
         .unwrap();
-        let argument_types = [
-            Type::U64,
-            Type::create_struct(vec![Type::U8; 17]).unwrap(),
-            Type::create_union(vec![Type::F32, Type::F64]).unwrap(),
-            Type::create_struct(vec![Type::U8]).unwrap(),
+        let argument_types = [Type::U64, Type::create_struct(vec![Type::U8; 17]).unwrap()];
+        let variadic_types = [
+            VariadicType::create_union(vec![Type::F32, Type::F64]).unwrap(),
+            VariadicType::create_struct(vec![Type::U8]).unwrap(),
+            VariadicType::F64,
         ];
+        let signature =
+            CallSignature::variadic(&argument_types, &variadic_types, Some(&return_type));
         let mut scratch = Vec::new();
+        let return_view = signature.return_type().unwrap();
         assert_eq!(
-            ValueClass::classify(&return_type, &return_type.layout(), &mut scratch),
+            ValueClass::classify(return_view, &return_view.layout(), &mut scratch),
             ValueClass::IntegerSse,
         );
         let capacity = scratch.capacity();
@@ -348,15 +357,16 @@ mod tests {
             (ValueClass::Memory, 0),
             (ValueClass::Sse, 3),
             (ValueClass::Integer, 2),
+            (ValueClass::Sse, 0),
         ];
 
-        for (ty, (class, node_count)) in argument_types.iter().zip(expected) {
+        for (ty, (class, node_count)) in signature.arguments().zip(expected) {
             assert_eq!(ValueClass::classify(ty, &ty.layout(), &mut scratch), class);
             assert_eq!(scratch.capacity(), capacity);
             assert_eq!(scratch.as_ptr(), pointer);
             assert_eq!(scratch.len(), node_count);
             if node_count != 0 {
-                assert!(core::ptr::eq(scratch[0].ty, ty));
+                assert_eq!(scratch[0].ty, ty);
                 assert_eq!(scratch[0].subtree_end, node_count);
             }
         }

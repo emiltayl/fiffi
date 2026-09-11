@@ -39,7 +39,7 @@ use core::ptr;
 use crate::__msan_unpoison;
 use crate::backend::CallInterface;
 use crate::types::{FfiTypeLayout, Type, VariadicType};
-use crate::{Abi, FnPtr};
+use crate::{Abi, FnPtr, VariadicAbi};
 
 /// Reference to an argument to pass to [`Function::call`].
 ///
@@ -249,7 +249,7 @@ impl Function {
             fixed_argument_types,
             variadic_argument_types,
             return_type,
-            Abi::default(),
+            VariadicAbi::default(),
         )
     }
 
@@ -268,18 +268,28 @@ impl Function {
         }
     }
 
-    /// Creates a variadic `Function` using the provided [`Abi`].
+    /// Creates a variadic `Function` using the provided [`VariadicAbi`].
     ///
     /// `fixed_argument_types` must describe the fixed parameters, and `variadic_argument_types`
     /// must describe the variadic arguments supplied for a call.
     pub fn variadic_with_abi(
-        _fn_ptr: FnPtr,
-        _fixed_argument_types: &[Type],
-        _variadic_argument_types: &[VariadicType],
-        _return_type: Option<&Type>,
-        _abi: Abi,
+        fn_ptr: FnPtr,
+        fixed_argument_types: &[Type],
+        variadic_argument_types: &[VariadicType],
+        return_type: Option<&Type>,
+        abi: VariadicAbi,
     ) -> Self {
-        todo!();
+        let call_interface = CallInterface::variadic(
+            fixed_argument_types,
+            variadic_argument_types,
+            return_type,
+            abi,
+        );
+
+        Self {
+            call_interface,
+            fn_ptr,
+        }
     }
 
     /// Create a [`FunctionBuilder`] used to build a [`Function`].
@@ -317,7 +327,7 @@ impl Function {
             fixed_argument_types: Vec::new(),
             variadic_argument_types: Vec::new(),
             return_type: None,
-            abi: Abi::default(),
+            abi: VariadicAbi::default(),
         }
     }
 
@@ -538,7 +548,7 @@ pub struct VariadicFunctionBuilder<State> {
     fixed_argument_types: Vec<Type>,
     variadic_argument_types: Vec<VariadicType>,
     return_type: Option<Type>,
-    abi: Abi,
+    abi: VariadicAbi,
 }
 
 impl<State> VariadicFunctionBuilder<State> {
@@ -556,7 +566,7 @@ impl<State> VariadicFunctionBuilder<State> {
 
     /// Set the function's ABI.
     #[must_use]
-    pub fn abi(mut self, abi: Abi) -> Self {
+    pub fn abi(mut self, abi: VariadicAbi) -> Self {
         self.abi = abi;
         self
     }

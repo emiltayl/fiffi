@@ -32,6 +32,7 @@ ABIs on common platforms, and then branch out from there as needed.
 
 # Work log
 
+* 2026-09-11 Added variadic support.
 * 2026-09-10 Made it possible to discard return values for functions with a non-void return value.
 * 2026-08-30 Win64 function call support.
 * 2026-08-26 Created marshalling plan for Win64 function calls.

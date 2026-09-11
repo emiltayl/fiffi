@@ -4,7 +4,8 @@ extern crate alloc;
 use alloc::{boxed::Box, vec::Vec};
 
 use super::classification::ValueClass;
-use crate::types::{LayoutNode, Type};
+use crate::backend::CallSignature;
+use crate::types::{LayoutNode, TypeRef};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MarshalPlan {
@@ -16,25 +17,30 @@ pub(crate) struct MarshalPlan {
 
     /// How the function returns its value.
     pub(super) return_strategy: ReturnStrategy,
+
+    /// The contents of the `al` register when calling the function. For variadic functions this
+    /// must be the upper bound of how many `xmm` registers are used to pass arguments. It is set
+    /// for regular functions as well to keep the code as simple as possible
+    pub(super) al: u8,
 }
 
 impl MarshalPlan {
-    pub(crate) fn build(argument_types: &[Type], return_type: Option<&Type>) -> Self {
+    pub(crate) fn build(signature: CallSignature<'_>) -> Self {
         let mut register_allocator = RegisterAllocator::default();
 
-        let mut argument_moves = Vec::with_capacity(argument_types.len());
+        let mut argument_moves = Vec::with_capacity(signature.argument_count());
         let mut stack_buffer_size: usize = 0;
 
         let mut classification_scratch = Vec::new();
         let return_strategy =
-            ReturnStrategy::for_return_type(return_type, &mut classification_scratch);
+            ReturnStrategy::for_return_type(signature.return_type(), &mut classification_scratch);
 
         // Reserve the first GPR for the hidden return pointer if needed.
         if matches!(return_strategy, ReturnStrategy::HiddenPointer { .. }) {
             register_allocator.allocate(RegisterRequirements::One(RegisterBank::Gpr));
         }
 
-        for (argument_index, argument) in argument_types.iter().enumerate() {
+        for (argument_index, argument) in signature.arguments().enumerate() {
             let argument_layout = argument.layout();
             let argument_class =
                 ValueClass::classify(argument, &argument_layout, &mut classification_scratch);
@@ -81,6 +87,8 @@ impl MarshalPlan {
             argument_moves: argument_moves.into_boxed_slice(),
             stack_buffer_size,
             return_strategy,
+            al: u8::try_from(register_allocator.next_xmm_index)
+                .expect("Register allocator allocated > 255 xmm registers"),
         }
     }
 }
@@ -191,7 +199,7 @@ pub(super) enum ReturnStrategy {
 
 impl ReturnStrategy {
     fn for_return_type<'ty>(
-        return_type: Option<&'ty Type>,
+        return_type: Option<TypeRef<'ty>>,
         scratch: &mut Vec<LayoutNode<'ty>>,
     ) -> Self {
         let Some(return_type) = return_type else {
@@ -337,6 +345,7 @@ impl RegisterAllocator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{Type, VariadicType};
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum ExpectedLocation {
@@ -388,7 +397,19 @@ mod tests {
         expected_moves: &[ExpectedMove],
         expected_stack_buffer_size: usize,
     ) {
-        let plan = MarshalPlan::build(argument_types, return_type);
+        assert_signature_plan(
+            CallSignature::new(argument_types, return_type),
+            expected_moves,
+            expected_stack_buffer_size,
+        );
+    }
+
+    fn assert_signature_plan(
+        signature: CallSignature<'_>,
+        expected_moves: &[ExpectedMove],
+        expected_stack_buffer_size: usize,
+    ) -> MarshalPlan {
+        let plan = MarshalPlan::build(signature);
 
         let mut actual_moves = plan
             .argument_moves
@@ -437,6 +458,7 @@ mod tests {
 
         assert_eq!(actual_moves, expected_moves);
         assert_eq!(plan.stack_buffer_size, expected_stack_buffer_size);
+        plan
     }
 
     fn struct_type(fields: &[Type]) -> Type {
@@ -525,7 +547,7 @@ mod tests {
         ];
 
         for (return_type, expected_strategy) in cases {
-            let plan = MarshalPlan::build(&[], return_type.as_ref());
+            let plan = MarshalPlan::build(CallSignature::new(&[], return_type.as_ref()));
             assert_eq!(plan.return_strategy, expected_strategy);
         }
     }
@@ -533,6 +555,126 @@ mod tests {
     #[test]
     fn empty_signature_requires_no_argument_storage() {
         assert_marshal_plan(&[], None, &[], 0);
+    }
+
+    #[test]
+    fn variadic_al_counts_only_allocated_argument_vector_registers() {
+        let hidden_return = struct_type(&[const { Type::U64 }; 3]);
+        for (fixed_count, variadic_count, return_type, expected_al) in [
+            (0, 0, None, 0),
+            (1, 0, None, 1),
+            (3, 5, None, 8),
+            (3, 6, None, 8),
+            (0, 0, Some(&Type::F64), 0),
+            (0, 0, Some(&hidden_return), 0),
+            (1, 1, Some(&hidden_return), 2),
+        ] {
+            let fixed = vec![Type::F64; fixed_count];
+            let variadic = vec![VariadicType::F64; variadic_count];
+            let plan = MarshalPlan::build(CallSignature::variadic(&fixed, &variadic, return_type));
+            assert_eq!(
+                plan.al, expected_al,
+                "{fixed_count} fixed, {variadic_count} variadic, {return_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn variadic_float_aggregate_counts_registers_and_preserves_partial_eightbytes() {
+        let variadic = [
+            VariadicType::create_struct(vec![Type::F32; 3]).unwrap(),
+            VariadicType::F64,
+        ];
+        let plan = assert_signature_plan(
+            CallSignature::variadic(&[], &variadic, None),
+            &[
+                ExpectedMove::eightbyte(0, 0, 8, ExpectedLocation::Xmm(0)),
+                ExpectedMove::eightbyte(0, 8, 4, ExpectedLocation::Xmm(1)),
+                ExpectedMove::eightbyte(1, 0, 8, ExpectedLocation::Xmm(2)),
+            ],
+            0,
+        );
+        assert_eq!(plan.al, 3);
+    }
+
+    #[test]
+    fn variadic_two_xmm_spill_leaves_the_last_register_available() {
+        let fixed = [const { Type::F64 }; 7];
+        let variadic = [
+            VariadicType::create_struct(vec![Type::F64; 2]).unwrap(),
+            VariadicType::F64,
+        ];
+        let mut expected: Vec<_> = (0..7)
+            .map(|index| ExpectedMove::whole_argument(&fixed, index, ExpectedLocation::Xmm(index)))
+            .collect();
+        expected.extend([
+            ExpectedMove::eightbyte(7, 0, 16, ExpectedLocation::Stack(0)),
+            ExpectedMove::eightbyte(8, 0, 8, ExpectedLocation::Xmm(7)),
+        ]);
+        let plan = assert_signature_plan(
+            CallSignature::variadic(&fixed, &variadic, None),
+            &expected,
+            16,
+        );
+        assert_eq!(plan.al, 8);
+    }
+
+    #[test]
+    fn variadic_mixed_spill_preserves_xmm_with_or_without_hidden_return() {
+        let hidden_return = struct_type(&[const { Type::U64 }; 3]);
+        let variadic = [
+            VariadicType::create_struct(vec![Type::U64, Type::F64]).unwrap(),
+            VariadicType::F64,
+        ];
+        for (fixed_count, first_gpr, return_type) in [(6, 0, None), (5, 1, Some(&hidden_return))] {
+            let fixed = vec![Type::U64; fixed_count];
+            let mut expected: Vec<_> = (0..fixed_count)
+                .map(|index| {
+                    ExpectedMove::whole_argument(
+                        &fixed,
+                        index,
+                        ExpectedLocation::Gpr(first_gpr + index),
+                    )
+                })
+                .collect();
+            expected.extend([
+                ExpectedMove::eightbyte(fixed_count, 0, 16, ExpectedLocation::Stack(0)),
+                ExpectedMove::eightbyte(fixed_count + 1, 0, 8, ExpectedLocation::Xmm(0)),
+            ]);
+            let plan = assert_signature_plan(
+                CallSignature::variadic(&fixed, &variadic, return_type),
+                &expected,
+                16,
+            );
+            assert_eq!(plan.al, 1);
+        }
+    }
+
+    #[test]
+    fn variadic_nested_fields_and_union_variants_preserve_eightbyte_classes() {
+        let float_fields = struct_type(&[const { Type::F32 }; 3]);
+        let integer_and_float = struct_type(&[Type::U8, Type::F64]);
+        for variants in [
+            vec![float_fields.clone(), integer_and_float.clone()],
+            vec![integer_and_float, float_fields],
+        ] {
+            let variadic = [
+                VariadicType::create_struct(vec![Type::F32, struct_type(&[Type::U32, Type::F32])])
+                    .unwrap(),
+                VariadicType::create_union(variants).unwrap(),
+            ];
+            let plan = assert_signature_plan(
+                CallSignature::variadic(&[], &variadic, None),
+                &[
+                    ExpectedMove::eightbyte(0, 0, 8, ExpectedLocation::Gpr(0)),
+                    ExpectedMove::eightbyte(0, 8, 4, ExpectedLocation::Xmm(0)),
+                    ExpectedMove::eightbyte(1, 0, 8, ExpectedLocation::Gpr(1)),
+                    ExpectedMove::eightbyte(1, 8, 8, ExpectedLocation::Xmm(1)),
+                ],
+                0,
+            );
+            assert_eq!(plan.al, 2);
+        }
     }
 
     #[test]
@@ -631,7 +773,8 @@ mod tests {
         ];
         assert_marshal_plan(&argument_types, Some(&return_type), &expected_moves, 24);
         assert_eq!(
-            MarshalPlan::build(&argument_types, Some(&return_type)).return_strategy,
+            MarshalPlan::build(CallSignature::new(&argument_types, Some(&return_type)))
+                .return_strategy,
             ReturnStrategy::TwoRegisters {
                 first_bank: RegisterBank::Gpr,
                 second_bank: RegisterBank::Xmm,

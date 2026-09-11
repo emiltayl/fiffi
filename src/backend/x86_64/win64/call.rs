@@ -376,13 +376,127 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fn_ptrize;
+    use crate::backend::CallSignature;
+    use crate::function::Function;
     use crate::test_utils::structs::{
         F32, F32_ARG, F32X2_ARG, F32x2, U8X3_ARG, U8x3, U64X2_ARG, U64x2, U64x3,
     };
-    use crate::types::{FfiType, Type};
+    use crate::types::{FfiType, Type, VariadicType};
+    use crate::{VariadicAbi, fn_ptrize};
 
     extern "C" fn unused_target() {}
+
+    #[test]
+    fn variadic_float_copies_preserve_bits_and_hidden_return_storage() {
+        let fixed = [Type::F32, Type::F64];
+        let variadic = [VariadicType::F64, VariadicType::F64];
+        let first = f32::from_bits(0xffc0_1234);
+        let second = -0.0f64;
+        let third = f64::from_bits(0x7ff8_1234_5678_9abc);
+        let fourth = -123.5f64;
+        let args = [
+            Arg::new(&first),
+            Arg::new(&second),
+            Arg::new(&third),
+            Arg::new(&fourth),
+        ];
+        let return_type = U64x3::ffi_type();
+
+        for hidden_return in [false, true] {
+            let plan = MarshalPlan::build(CallSignature::variadic(
+                &fixed,
+                &variadic,
+                hidden_return.then_some(&return_type),
+            ));
+            let mut return_value = MaybeUninit::<U64x3>::uninit();
+            let ret = hidden_return.then(|| Ret::new(&mut return_value));
+            let return_address = ret.as_ref().map(|ret| ret.as_ptr().expose_provenance());
+            let mut stack_buffer = vec![MaybeUninit::uninit(); plan.stack_buffer_size];
+            // SAFETY: Arguments and optional return storage match the plan, remain live,
+            // and are disjoint from the correctly sized stack buffer. The frame is not invoked.
+            let frame = unsafe {
+                CallFrame::new(
+                    &plan,
+                    fn_ptrize!(unused_target),
+                    &args,
+                    ret.as_ref(),
+                    &mut stack_buffer,
+                )
+            };
+            let first_slot = usize::from(hidden_return);
+            for registers in [&frame.gpr_registers, &frame.xmm_registers] {
+                assert_eq!(
+                    initialized_bytes::<4>(&registers[first_slot].0[..4]),
+                    first.to_ne_bytes()
+                );
+                assert_eq!(register_u64(&registers[first_slot + 1]), second.to_bits());
+                assert_eq!(register_u64(&registers[first_slot + 2]), third.to_bits());
+                if !hidden_return {
+                    assert_eq!(register_u64(&registers[3]), fourth.to_bits());
+                }
+            }
+            if let Some(address) = return_address {
+                assert_eq!(register_usize(&frame.gpr_registers[0]), address);
+                assert_eq!(initialized_bytes::<8>(&stack_buffer), fourth.to_ne_bytes());
+            } else {
+                assert!(stack_buffer.is_empty());
+            }
+            assert_eq!(frame.indirect_register_mask, 0);
+            assert_eq!(frame.indirect_stack_offsets_count, 0);
+        }
+    }
+
+    #[test]
+    fn variadic_empty_tail_delivers_float_duplicates_to_machine_registers() {
+        // The fixed signature describes every payload. The naked body additionally observes
+        // the GPR copies supplied by a variadic caller, without requiring a host-native VaList.
+        #[unsafe(naked)]
+        unsafe extern "win64" fn capture(_first: f32, _second: f64, _output: *mut [u64; 4]) {
+            core::arch::naked_asm!(
+                "movd eax, xmm0",
+                "mov [r8], rax",
+                "mov eax, ecx",
+                "mov [r8 + 8], rax",
+                "movq rax, xmm1",
+                "mov [r8 + 16], rax",
+                "mov [r8 + 24], rdx",
+                "ret",
+            );
+        }
+
+        let function = Function::variadic_with_abi(
+            fn_ptrize!(capture),
+            &[Type::F32, Type::F64, Type::Pointer],
+            &[],
+            None,
+            VariadicAbi::Win64,
+        );
+        let first = f32::from_bits(0xffc0_1234);
+        let second = f64::from_bits(0x7ff8_1234_5678_9abc);
+        let mut output = [0u64; 4];
+        let output_pointer = &raw mut output;
+        // SAFETY: The explicit Win64 ABI and all three payload types match capture.
+        // The output pointer names a separate live writable array of four u64s.
+        unsafe {
+            function.call(
+                &[
+                    Arg::new(&first),
+                    Arg::new(&second),
+                    Arg::new(&output_pointer),
+                ],
+                None,
+            );
+        }
+        assert_eq!(
+            output,
+            [
+                u64::from(first.to_bits()),
+                u64::from(first.to_bits()),
+                second.to_bits(),
+                second.to_bits()
+            ]
+        );
+    }
 
     fn initialized_bytes<const N: usize>(bytes: &[MaybeUninit<u8>]) -> [u8; N] {
         assert_eq!(bytes.len(), N);
@@ -523,10 +637,10 @@ mod tests {
 
     #[test]
     fn mixed_direct_arguments_are_copied_to_their_planned_destinations() {
-        let marshal_plan = MarshalPlan::build(
+        let marshal_plan = MarshalPlan::build(CallSignature::new(
             &[Type::U64, Type::F64, Type::U64, Type::F32, Type::F64],
             None,
-        );
+        ));
         let first_gpr = 0x1020_3040_5060_7080u64;
         let first_xmm = core::f64::consts::PI;
         let second_gpr = 0x90a0_b0c0_d0e0_f000u64;
@@ -582,7 +696,7 @@ mod tests {
 
     #[test]
     fn short_arguments_preserve_register_tails_and_stack_slot_padding() {
-        let marshal_plan = MarshalPlan::build(
+        let marshal_plan = MarshalPlan::build(CallSignature::new(
             &[
                 Type::U8,
                 Type::U16,
@@ -594,7 +708,7 @@ mod tests {
                 Type::F32,
             ],
             None,
-        );
+        ));
         let first = 0x81u8;
         let second = 0x9234u16;
         let third = 0xa345_6789u32;
@@ -659,10 +773,10 @@ mod tests {
 
     #[test]
     fn small_float_aggregates_use_gprs_alongside_positional_scalar_floats() {
-        let marshal_plan = MarshalPlan::build(
+        let marshal_plan = MarshalPlan::build(CallSignature::new(
             &[F32::ffi_type(), Type::F32, F32x2::ffi_type(), Type::F64],
             None,
-        );
+        ));
         let scalar_f32 = -core::f32::consts::PI;
         let scalar_f64 = core::f64::consts::E;
         let args = [
@@ -721,7 +835,7 @@ mod tests {
 
     #[test]
     fn indirect_arguments_store_copies_and_deferred_stack_addresses() {
-        let marshal_plan = MarshalPlan::build(
+        let marshal_plan = MarshalPlan::build(CallSignature::new(
             &[
                 U8x3::ffi_type(),
                 Type::U64,
@@ -730,7 +844,7 @@ mod tests {
                 U64x2::ffi_type(),
             ],
             None,
-        );
+        ));
         let first_direct = 0x1020_3040_5060_7080u64;
         let float_direct = core::f64::consts::PI;
         let second_direct = 0x90a0_b0c0_d0e0_f000u64;
@@ -800,7 +914,7 @@ mod tests {
     #[test]
     fn indirect_arguments_fill_all_gprs_and_multiple_stack_pointer_slots() {
         let argument_types = core::array::from_fn::<_, 6, _>(|_| U8x3::ffi_type());
-        let marshal_plan = MarshalPlan::build(&argument_types, None);
+        let marshal_plan = MarshalPlan::build(CallSignature::new(&argument_types, None));
         let values = [0x10u8, 0x20, 0x30, 0x40, 0x50, 0x60].map(|first| U8x3 {
             a: first,
             b: first + 1,
@@ -865,10 +979,10 @@ mod tests {
     #[test]
     fn hidden_return_pointer_shifts_mixed_arguments_into_registers_and_stack() {
         let return_type = U64x3::ffi_type();
-        let marshal_plan = MarshalPlan::build(
+        let marshal_plan = MarshalPlan::build(CallSignature::new(
             &[Type::U64, Type::F64, Type::U64, Type::F32],
             Some(&return_type),
-        );
+        ));
         let first = 0x1020_3040_5060_7080u64;
         let second = core::f64::consts::PI;
         let third = 0x90a0_b0c0_d0e0_f000u64;
@@ -917,7 +1031,10 @@ mod tests {
     #[test]
     fn hidden_return_and_direct_pointer_are_not_marked_as_stack_addresses() {
         let return_type = U64x3::ffi_type();
-        let marshal_plan = MarshalPlan::build(&[Type::Pointer, Type::U128], Some(&return_type));
+        let marshal_plan = MarshalPlan::build(CallSignature::new(
+            &[Type::Pointer, Type::U128],
+            Some(&return_type),
+        ));
         let direct_pointer = ptr::without_provenance::<core::ffi::c_void>(0xfedc_ba98_7654_3210);
         let indirect_argument = 0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00u128;
         let args = [Arg::new(&direct_pointer), Arg::new(&indirect_argument)];

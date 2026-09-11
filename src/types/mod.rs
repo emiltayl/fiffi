@@ -191,6 +191,217 @@ pub enum VariadicType {
     Union(internal::NonEmptyVec),
 }
 
+/// Primitive type tags shared by borrowed type descriptions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScalarType {
+    I8,
+    U8,
+    I16,
+    U16,
+    I32,
+    U32,
+    I64,
+    U64,
+    I128,
+    U128,
+    Isize,
+    Usize,
+    F32,
+    F64,
+    Pointer,
+}
+
+/// A type description borrowing aggregate members from a public type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TypeRef<'ty> {
+    Scalar(ScalarType),
+    Struct(&'ty [Type]),
+    Union(&'ty [Type]),
+}
+
+impl<'ty> From<&'ty Type> for TypeRef<'ty> {
+    fn from(ty: &'ty Type) -> Self {
+        match ty {
+            Type::I8 => Self::Scalar(ScalarType::I8),
+            Type::U8 => Self::Scalar(ScalarType::U8),
+            Type::I16 => Self::Scalar(ScalarType::I16),
+            Type::U16 => Self::Scalar(ScalarType::U16),
+            Type::I32 => Self::Scalar(ScalarType::I32),
+            Type::U32 => Self::Scalar(ScalarType::U32),
+            Type::I64 => Self::Scalar(ScalarType::I64),
+            Type::U64 => Self::Scalar(ScalarType::U64),
+            Type::I128 => Self::Scalar(ScalarType::I128),
+            Type::U128 => Self::Scalar(ScalarType::U128),
+            Type::Isize => Self::Scalar(ScalarType::Isize),
+            Type::Usize => Self::Scalar(ScalarType::Usize),
+            Type::F32 => Self::Scalar(ScalarType::F32),
+            Type::F64 => Self::Scalar(ScalarType::F64),
+            Type::Pointer => Self::Scalar(ScalarType::Pointer),
+            Type::Struct(types) => Self::Struct(types.as_slice()),
+            Type::Union(types) => Self::Union(types.as_slice()),
+        }
+    }
+}
+
+impl<'ty> From<&'ty VariadicType> for TypeRef<'ty> {
+    fn from(ty: &'ty VariadicType) -> Self {
+        match ty {
+            VariadicType::I32 => Self::Scalar(ScalarType::I32),
+            VariadicType::U32 => Self::Scalar(ScalarType::U32),
+            VariadicType::I64 => Self::Scalar(ScalarType::I64),
+            VariadicType::U64 => Self::Scalar(ScalarType::U64),
+            VariadicType::I128 => Self::Scalar(ScalarType::I128),
+            VariadicType::U128 => Self::Scalar(ScalarType::U128),
+            VariadicType::Isize => Self::Scalar(ScalarType::Isize),
+            VariadicType::Usize => Self::Scalar(ScalarType::Usize),
+            VariadicType::F64 => Self::Scalar(ScalarType::F64),
+            VariadicType::Pointer => Self::Scalar(ScalarType::Pointer),
+            VariadicType::Struct(types) => Self::Struct(types.as_slice()),
+            VariadicType::Union(types) => Self::Union(types.as_slice()),
+        }
+    }
+}
+
+impl ScalarType {
+    fn layout(self) -> FfiTypeLayout {
+        match self {
+            Self::I8 => FfiTypeLayout {
+                align: align_of::<i8>(),
+                size: size_of::<i8>(),
+            },
+            Self::U8 => FfiTypeLayout {
+                align: align_of::<u8>(),
+                size: size_of::<u8>(),
+            },
+            Self::I16 => FfiTypeLayout {
+                align: align_of::<i16>(),
+                size: size_of::<i16>(),
+            },
+            Self::U16 => FfiTypeLayout {
+                align: align_of::<u16>(),
+                size: size_of::<u16>(),
+            },
+            Self::I32 => FfiTypeLayout {
+                align: align_of::<i32>(),
+                size: size_of::<i32>(),
+            },
+            Self::U32 => FfiTypeLayout {
+                align: align_of::<u32>(),
+                size: size_of::<u32>(),
+            },
+            Self::I64 => FfiTypeLayout {
+                align: align_of::<i64>(),
+                size: size_of::<i64>(),
+            },
+            Self::U64 => FfiTypeLayout {
+                align: align_of::<u64>(),
+                size: size_of::<u64>(),
+            },
+            Self::I128 => FfiTypeLayout {
+                align: align_of::<i128>(),
+                size: size_of::<i128>(),
+            },
+            Self::U128 => FfiTypeLayout {
+                align: align_of::<u128>(),
+                size: size_of::<u128>(),
+            },
+            Self::Isize => FfiTypeLayout {
+                align: align_of::<isize>(),
+                size: size_of::<isize>(),
+            },
+            Self::Usize => FfiTypeLayout {
+                align: align_of::<usize>(),
+                size: size_of::<usize>(),
+            },
+            Self::F32 => FfiTypeLayout {
+                align: align_of::<f32>(),
+                size: size_of::<f32>(),
+            },
+            Self::F64 => FfiTypeLayout {
+                align: align_of::<f64>(),
+                size: size_of::<f64>(),
+            },
+            Self::Pointer => FfiTypeLayout {
+                align: align_of::<*const c_void>(),
+                size: size_of::<*const c_void>(),
+            },
+        }
+    }
+}
+
+impl<'ty> TypeRef<'ty> {
+    pub(crate) fn layout(self) -> FfiTypeLayout {
+        match self {
+            Self::Scalar(scalar) => scalar.layout(),
+            Self::Struct(fields) => {
+                let mut layout = FfiTypeLayout { align: 1, size: 0 };
+
+                for field in fields {
+                    layout.append_field(field.layout());
+                }
+
+                layout.pad_to_alignment();
+
+                layout
+            }
+            Self::Union(variants) => {
+                let mut layout = FfiTypeLayout { align: 1, size: 0 };
+
+                for variant in variants {
+                    layout.include_variant(variant.layout());
+                }
+
+                layout.pad_to_alignment();
+
+                layout
+            }
+        }
+    }
+
+    /// Prepares layouts for this type and all descendants in preorder, replacing the nodes
+    /// while retaining their allocation for reuse.
+    pub(crate) fn layout_nodes_into(self, nodes: &mut Vec<LayoutNode<'ty>>) {
+        nodes.clear();
+        self.append_layout_node(nodes);
+    }
+
+    fn append_layout_node(self, nodes: &mut Vec<LayoutNode<'ty>>) -> usize {
+        let node_index = nodes.len();
+        let mut layout = FfiTypeLayout { align: 1, size: 0 };
+        nodes.push(LayoutNode {
+            ty: self,
+            layout,
+            offset_in_parent: 0,
+            subtree_end: node_index + 1,
+        });
+
+        match self {
+            Self::Struct(fields) => {
+                for field in fields {
+                    let child_index = Self::from(field).append_layout_node(nodes);
+                    let child = &mut nodes[child_index];
+                    child.offset_in_parent = layout.append_field(child.layout);
+                }
+                layout.pad_to_alignment();
+            }
+            Self::Union(variants) => {
+                for variant in variants {
+                    let child_index = Self::from(variant).append_layout_node(nodes);
+                    layout.include_variant(nodes[child_index].layout);
+                }
+                layout.pad_to_alignment();
+            }
+            // Only scalar layout lookups are used here: aggregate layouts come from the
+            // completed children, so each type node is prepared exactly once.
+            Self::Scalar(scalar) => layout = scalar.layout(),
+        }
+
+        nodes[node_index].layout = layout;
+        nodes[node_index].subtree_end = nodes.len();
+        node_index
+    }
+}
+
 /// Size and alignment used by fiffi for a [`Type`].
 ///
 /// This can be used to make sure that [`FfiType`] implementations are correct by verifying
@@ -228,7 +439,7 @@ impl FfiTypeLayout {
 /// A type's layout and position within a preorder traversal of a type tree.
 #[derive(Debug)]
 pub(crate) struct LayoutNode<'ty> {
-    pub ty: &'ty Type,
+    pub ty: TypeRef<'ty>,
     pub layout: FfiTypeLayout,
     /// Offset relative to the parent; zero for the root and union variants.
     pub offset_in_parent: usize,
@@ -344,133 +555,7 @@ impl Type {
 
     /// Returns this type's size and alignment.
     pub fn layout(&self) -> FfiTypeLayout {
-        match self {
-            Type::I8 => FfiTypeLayout {
-                align: align_of::<i8>(),
-                size: size_of::<i8>(),
-            },
-            Type::U8 => FfiTypeLayout {
-                align: align_of::<u8>(),
-                size: size_of::<u8>(),
-            },
-            Type::I16 => FfiTypeLayout {
-                align: align_of::<i16>(),
-                size: size_of::<i16>(),
-            },
-            Type::U16 => FfiTypeLayout {
-                align: align_of::<u16>(),
-                size: size_of::<u16>(),
-            },
-            Type::I32 => FfiTypeLayout {
-                align: align_of::<i32>(),
-                size: size_of::<i32>(),
-            },
-            Type::U32 => FfiTypeLayout {
-                align: align_of::<u32>(),
-                size: size_of::<u32>(),
-            },
-            Type::I64 => FfiTypeLayout {
-                align: align_of::<i64>(),
-                size: size_of::<i64>(),
-            },
-            Type::U64 => FfiTypeLayout {
-                align: align_of::<u64>(),
-                size: size_of::<u64>(),
-            },
-            Type::I128 => FfiTypeLayout {
-                align: align_of::<i128>(),
-                size: size_of::<i128>(),
-            },
-            Type::U128 => FfiTypeLayout {
-                align: align_of::<u128>(),
-                size: size_of::<u128>(),
-            },
-            Type::Isize => FfiTypeLayout {
-                align: align_of::<isize>(),
-                size: size_of::<isize>(),
-            },
-            Type::Usize => FfiTypeLayout {
-                align: align_of::<usize>(),
-                size: size_of::<usize>(),
-            },
-            Type::F32 => FfiTypeLayout {
-                align: align_of::<f32>(),
-                size: size_of::<f32>(),
-            },
-            Type::F64 => FfiTypeLayout {
-                align: align_of::<f64>(),
-                size: size_of::<f64>(),
-            },
-            Type::Pointer => FfiTypeLayout {
-                align: align_of::<*const c_void>(),
-                size: size_of::<*const c_void>(),
-            },
-            Type::Struct(type_vec) => {
-                let mut layout = FfiTypeLayout { align: 1, size: 0 };
-
-                for field in type_vec.as_slice() {
-                    layout.append_field(field.layout());
-                }
-
-                layout.pad_to_alignment();
-
-                layout
-            }
-            Type::Union(type_vec) => {
-                let mut layout = FfiTypeLayout { align: 1, size: 0 };
-
-                for field in type_vec.as_slice() {
-                    layout.include_variant(field.layout());
-                }
-
-                layout.pad_to_alignment();
-
-                layout
-            }
-        }
-    }
-
-    /// Prepares layouts for this type and all descendants in preorder, replacing the nodes
-    /// while retaining their allocation for reuse.
-    pub(crate) fn layout_nodes_into<'ty>(&'ty self, nodes: &mut Vec<LayoutNode<'ty>>) {
-        nodes.clear();
-        self.append_layout_node(nodes);
-    }
-
-    fn append_layout_node<'ty>(&'ty self, nodes: &mut Vec<LayoutNode<'ty>>) -> usize {
-        let node_index = nodes.len();
-        let mut layout = FfiTypeLayout { align: 1, size: 0 };
-        nodes.push(LayoutNode {
-            ty: self,
-            layout,
-            offset_in_parent: 0,
-            subtree_end: node_index + 1,
-        });
-
-        match self {
-            Type::Struct(fields) => {
-                for field in fields.as_slice() {
-                    let child_index = field.append_layout_node(nodes);
-                    let child = &mut nodes[child_index];
-                    child.offset_in_parent = layout.append_field(child.layout);
-                }
-                layout.pad_to_alignment();
-            }
-            Type::Union(variants) => {
-                for variant in variants.as_slice() {
-                    let child_index = variant.append_layout_node(nodes);
-                    layout.include_variant(nodes[child_index].layout);
-                }
-                layout.pad_to_alignment();
-            }
-            // Only scalar layout lookups are used here: aggregate layouts come from the
-            // completed children, so each type node is prepared exactly once.
-            _ => layout = self.layout(),
-        }
-
-        nodes[node_index].layout = layout;
-        nodes[node_index].subtree_end = nodes.len();
-        node_index
+        TypeRef::from(self).layout()
     }
 
     /// Returns struct field offsets in declaration order, or an empty vector for other types.
@@ -816,13 +901,13 @@ mod tests {
     use core::ffi::c_void;
     use core::mem::offset_of;
 
-    use super::{FfiType, FfiTypeLayout, LayoutNode, Type};
+    use super::{FfiType, FfiTypeLayout, LayoutNode, ScalarType, Type, TypeRef, VariadicType};
     use crate::test_utils::structs::*;
     use crate::test_utils::unions::*;
 
     fn layout_nodes(ty: &Type) -> Vec<LayoutNode<'_>> {
         let mut nodes = Vec::new();
-        ty.layout_nodes_into(&mut nodes);
+        TypeRef::from(ty).layout_nodes_into(&mut nodes);
         nodes
     }
 
@@ -847,7 +932,7 @@ mod tests {
         assert_eq!(nodes[0].layout, layout, "{}", type_name::<T>());
         assert_eq!(nodes[0].offset_in_parent, 0);
         assert_eq!(nodes[0].subtree_end, nodes.len());
-        assert!(core::ptr::eq(nodes[0].ty, &ty));
+        assert_eq!(nodes[0].ty, TypeRef::from(&ty));
     }
 
     fn assert_field_offsets<T: FfiType>(expected: &[usize]) {
@@ -896,7 +981,7 @@ mod tests {
         for (ty, expected) in cases {
             let nodes = layout_nodes(&ty);
             assert_node_metadata(&nodes, &[expected]);
-            assert!(core::ptr::eq(nodes[0].ty, &ty));
+            assert_eq!(nodes[0].ty, TypeRef::from(&ty));
         }
     }
 
@@ -922,9 +1007,9 @@ mod tests {
                 expected_node::<u16>(offset_of!(Outer, tail), 7),
             ],
         );
-        assert_eq!(nodes[2].ty, &Type::U8);
-        assert_eq!(nodes[4].ty, &Type::U32);
-        assert_eq!(nodes[6].ty, &Type::U16);
+        assert_eq!(nodes[2].ty, TypeRef::Scalar(ScalarType::U8));
+        assert_eq!(nodes[4].ty, TypeRef::Scalar(ScalarType::U32));
+        assert_eq!(nodes[6].ty, TypeRef::Scalar(ScalarType::U16));
     }
 
     #[test]
@@ -969,14 +1054,64 @@ mod tests {
         assert_eq!(nodes[0].layout.size, 17);
 
         for (ty, node_count) in [(&smaller, 5), (&scalar, 1), (&original, 18)] {
-            ty.layout_nodes_into(&mut nodes);
+            TypeRef::from(ty).layout_nodes_into(&mut nodes);
             assert_eq!(nodes.len(), node_count);
             assert_eq!(nodes.capacity(), capacity);
             assert_eq!(nodes.as_ptr(), pointer);
-            assert!(core::ptr::eq(nodes[0].ty, ty));
+            assert_eq!(nodes[0].ty, TypeRef::from(ty));
             assert_eq!(nodes[0].layout, ty.layout());
             assert_eq!(nodes[0].offset_in_parent, 0);
             assert_eq!(nodes[0].subtree_end, node_count);
+        }
+    }
+
+    #[test]
+    fn aggregate_views_borrow_members_without_promoting_nested_fields() {
+        let fields = vec![
+            Type::U8,
+            Type::create_struct(vec![Type::F32, Type::U16]).unwrap(),
+        ];
+        for ty in [
+            Type::create_struct(fields.clone()).unwrap(),
+            Type::create_union(fields).unwrap(),
+        ] {
+            let expected_layout = ty.layout();
+            let is_struct = matches!(ty, Type::Struct(_));
+            let members = match &ty {
+                Type::Struct(members) | Type::Union(members) => members.as_slice(),
+                _ => unreachable!(),
+            };
+            let members_pointer = members.as_ptr();
+            let Type::Struct(nested) = &members[1] else {
+                unreachable!()
+            };
+            let nested_pointer = nested.as_slice().as_ptr();
+
+            // Moving into VariadicType must keep both levels of member storage intact.
+            let check_view = |view: TypeRef<'_>| {
+                assert_eq!(matches!(view, TypeRef::Struct(_)), is_struct);
+                let (TypeRef::Struct(members) | TypeRef::Union(members)) = view else {
+                    unreachable!()
+                };
+                assert_eq!(members.as_ptr(), members_pointer);
+                assert_eq!(view.layout(), expected_layout);
+                let mut nodes = Vec::new();
+                view.layout_nodes_into(&mut nodes);
+                assert_eq!(nodes[0].layout, expected_layout);
+                assert_eq!(nodes[1].ty, TypeRef::Scalar(ScalarType::U8));
+                let TypeRef::Struct(nested) = nodes[2].ty else {
+                    unreachable!()
+                };
+                assert_eq!(nested.as_ptr(), nested_pointer);
+                assert_eq!(nodes[3].ty, TypeRef::Scalar(ScalarType::F32));
+                assert_eq!(nodes[3].layout.size, size_of::<f32>());
+                assert_eq!(nodes[4].ty, TypeRef::Scalar(ScalarType::U16));
+                assert_eq!(nodes[4].layout.size, size_of::<u16>());
+            };
+
+            check_view(TypeRef::from(&ty));
+            let variadic = VariadicType::try_from(ty).unwrap();
+            check_view(TypeRef::from(&variadic));
         }
     }
 

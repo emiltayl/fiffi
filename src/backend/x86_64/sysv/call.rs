@@ -24,6 +24,9 @@ struct CallFrame {
     stack_buffer_ptr: *const MaybeUninit<u8>,
     stack_buffer_len: usize,
     fn_ptr: FnPtr,
+
+    /// See [`MarshalPlan::al`].
+    al: u8,
 }
 
 impl CallFrame {
@@ -49,6 +52,7 @@ impl CallFrame {
             stack_buffer_ptr: ptr::null(),
             stack_buffer_len: stack_buffer.len(),
             fn_ptr,
+            al: marshal_plan.al,
         };
 
         // The hidden return pointer occupies the first GPR.
@@ -292,6 +296,7 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         "add rdi, rsp",
 
         "20:",
+        "mov al, [r12 + {al_offset}]",
         "mov r11, [r12 + {fn_ptr_offset}]",
         "call r11",
 
@@ -326,11 +331,14 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         register_size = const size_of::<Register>(),
 
         fn_ptr_offset = const offset_of!(CallFrame, fn_ptr),
+
+        al_offset = const offset_of!(CallFrame, al),
     );
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::CallSignature;
     use crate::fn_ptrize;
     use crate::test_utils::structs::{U64_F64_ARG, U64F64, U64X2_ARG, U64x2, U64x3};
     use crate::types::{FfiType, Type};
@@ -364,6 +372,7 @@ mod tests {
             stack_buffer_ptr: ptr::null(),
             stack_buffer_len: 0,
             fn_ptr: fn_ptrize!(unused_target),
+            al: 0,
         };
 
         call_frame.gpr_registers[0].update_from_bytes(&GPR_RETURN_0);
@@ -508,7 +517,7 @@ mod tests {
 
     #[test]
     fn split_argument_uses_source_offset_for_second_eightbyte() {
-        let marshal_plan = MarshalPlan::build(&[U64x2::ffi_type()], None);
+        let marshal_plan = MarshalPlan::build(CallSignature::new(&[U64x2::ffi_type()], None));
         let args = [Arg::new(&U64X2_ARG)];
         let ret = None;
         let mut stack_buffer = vec![MaybeUninit::uninit(); marshal_plan.stack_buffer_size];
@@ -532,7 +541,7 @@ mod tests {
 
     #[test]
     fn mixed_aggregate_marshals_each_eightbyte_to_its_register_bank() {
-        let marshal_plan = MarshalPlan::build(&[U64F64::ffi_type()], None);
+        let marshal_plan = MarshalPlan::build(CallSignature::new(&[U64F64::ffi_type()], None));
         let args = [Arg::new(&U64_F64_ARG)];
         let ret = None;
         let mut stack_buffer = alloc::vec![
@@ -572,7 +581,7 @@ mod tests {
             Type::U64,
             Type::U128,
         ];
-        let marshal_plan = MarshalPlan::build(&argument_types, None);
+        let marshal_plan = MarshalPlan::build(CallSignature::new(&argument_types, None));
         let register_arguments = [1u64, 2, 3, 4, 5, 6];
         let stack_u64 = 0x1122_3344_5566_7788u64;
         let stack_u128 = 0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00u128;
@@ -618,7 +627,7 @@ mod tests {
     #[test]
     fn hidden_return_pointer_uses_first_gpr_and_shifts_arguments() {
         let return_type = U64x3::ffi_type();
-        let marshal_plan = MarshalPlan::build(&[Type::U64], Some(&return_type));
+        let marshal_plan = MarshalPlan::build(CallSignature::new(&[Type::U64], Some(&return_type)));
         let argument = 0x0123_4567_89ab_cdefu64;
         let args = [Arg::new(&argument)];
         let mut return_value = MaybeUninit::<U64x3>::uninit();
@@ -660,6 +669,7 @@ mod tests {
             stack_buffer_ptr: ptr::null(),
             stack_buffer_len: 0,
             fn_ptr: fn_ptrize!(unused_target),
+            al: 0,
         };
         let mut stack_buffer = [];
         let invalid_move = ArgumentMove {

@@ -168,7 +168,7 @@ pub mod types;
 
 mod fn_ptr;
 
-pub use backend::Abi;
+pub use backend::{Abi, VariadicAbi};
 pub use fn_ptr::FnPtr;
 
 #[cfg(msan)]
