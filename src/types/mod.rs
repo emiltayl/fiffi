@@ -329,7 +329,7 @@ impl ScalarType {
     }
 }
 
-impl<'ty> TypeRef<'ty> {
+impl TypeRef<'_> {
     pub(crate) fn layout(self) -> FfiTypeLayout {
         match self {
             Self::Scalar(scalar) => scalar.layout(),
@@ -357,49 +357,6 @@ impl<'ty> TypeRef<'ty> {
             }
         }
     }
-
-    /// Prepares layouts for this type and all descendants in preorder, replacing the nodes
-    /// while retaining their allocation for reuse.
-    pub(crate) fn layout_nodes_into(self, nodes: &mut Vec<LayoutNode<'ty>>) {
-        nodes.clear();
-        self.append_layout_node(nodes);
-    }
-
-    fn append_layout_node(self, nodes: &mut Vec<LayoutNode<'ty>>) -> usize {
-        let node_index = nodes.len();
-        let mut layout = FfiTypeLayout { align: 1, size: 0 };
-        nodes.push(LayoutNode {
-            ty: self,
-            layout,
-            offset_in_parent: 0,
-            subtree_end: node_index + 1,
-        });
-
-        match self {
-            Self::Struct(fields) => {
-                for field in fields {
-                    let child_index = Self::from(field).append_layout_node(nodes);
-                    let child = &mut nodes[child_index];
-                    child.offset_in_parent = layout.append_field(child.layout);
-                }
-                layout.pad_to_alignment();
-            }
-            Self::Union(variants) => {
-                for variant in variants {
-                    let child_index = Self::from(variant).append_layout_node(nodes);
-                    layout.include_variant(nodes[child_index].layout);
-                }
-                layout.pad_to_alignment();
-            }
-            // Only scalar layout lookups are used here: aggregate layouts come from the
-            // completed children, so each type node is prepared exactly once.
-            Self::Scalar(scalar) => layout = scalar.layout(),
-        }
-
-        nodes[node_index].layout = layout;
-        nodes[node_index].subtree_end = nodes.len();
-        node_index
-    }
 }
 
 /// Size and alignment used by fiffi for a [`Type`].
@@ -418,7 +375,7 @@ pub struct FfiTypeLayout {
 
 impl FfiTypeLayout {
     /// Appends a struct field and returns its offset before advancing past it.
-    fn append_field(&mut self, field: Self) -> usize {
+    pub(crate) fn append_field(&mut self, field: Self) -> usize {
         self.size += padding_needed(self.size, field.align);
         let offset = self.size;
         self.size += field.size;
@@ -426,25 +383,14 @@ impl FfiTypeLayout {
         offset
     }
 
-    fn include_variant(&mut self, variant: Self) {
+    pub(crate) fn include_variant(&mut self, variant: Self) {
         self.align = self.align.max(variant.align);
         self.size = self.size.max(variant.size);
     }
 
-    fn pad_to_alignment(&mut self) {
+    pub(crate) fn pad_to_alignment(&mut self) {
         self.size += padding_needed(self.size, self.align);
     }
-}
-
-/// A type's layout and position within a preorder traversal of a type tree.
-#[derive(Debug)]
-pub(crate) struct LayoutNode<'ty> {
-    pub ty: TypeRef<'ty>,
-    pub layout: FfiTypeLayout,
-    /// Offset relative to the parent; zero for the root and union variants.
-    pub offset_in_parent: usize,
-    /// Exclusive end of this node's subtree, including the node itself.
-    pub subtree_end: usize,
 }
 
 /// Calculate the padding needed to `size` to align with `align`.
@@ -901,15 +847,9 @@ mod tests {
     use core::ffi::c_void;
     use core::mem::offset_of;
 
-    use super::{FfiType, FfiTypeLayout, LayoutNode, ScalarType, Type, TypeRef, VariadicType};
+    use super::{FfiType, ScalarType, Type, TypeRef, VariadicType};
     use crate::test_utils::structs::*;
     use crate::test_utils::unions::*;
-
-    fn layout_nodes(ty: &Type) -> Vec<LayoutNode<'_>> {
-        let mut nodes = Vec::new();
-        TypeRef::from(ty).layout_nodes_into(&mut nodes);
-        nodes
-    }
 
     fn assert_ffi_layout<T: FfiType>() {
         let ty = T::ffi_type();
@@ -927,12 +867,6 @@ mod tests {
             "size mismatch for {}",
             type_name::<T>(),
         );
-
-        let nodes = layout_nodes(&ty);
-        assert_eq!(nodes[0].layout, layout, "{}", type_name::<T>());
-        assert_eq!(nodes[0].offset_in_parent, 0);
-        assert_eq!(nodes[0].subtree_end, nodes.len());
-        assert_eq!(nodes[0].ty, TypeRef::from(&ty));
     }
 
     fn assert_field_offsets<T: FfiType>(expected: &[usize]) {
@@ -950,119 +884,6 @@ mod tests {
         ($($type:ty),+ $(,)?) => {
             $(assert_ffi_layout::<$type>();)+
         };
-    }
-
-    fn expected_node<T>(offset: usize, subtree_end: usize) -> (FfiTypeLayout, usize, usize) {
-        (
-            FfiTypeLayout {
-                size: size_of::<T>(),
-                align: align_of::<T>(),
-            },
-            offset,
-            subtree_end,
-        )
-    }
-
-    fn assert_node_metadata(nodes: &[LayoutNode<'_>], expected: &[(FfiTypeLayout, usize, usize)]) {
-        let actual: Vec<_> = nodes
-            .iter()
-            .map(|node| (node.layout, node.offset_in_parent, node.subtree_end))
-            .collect();
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn layout_nodes_include_scalar_roots() {
-        let cases = [
-            (Type::F64, expected_node::<f64>(0, 1)),
-            (Type::U128, expected_node::<u128>(0, 1)),
-            (Type::Pointer, expected_node::<*const c_void>(0, 1)),
-        ];
-        for (ty, expected) in cases {
-            let nodes = layout_nodes(&ty);
-            assert_node_metadata(&nodes, &[expected]);
-            assert_eq!(nodes[0].ty, TypeRef::from(&ty));
-        }
-    }
-
-    #[test]
-    fn layout_nodes_preserve_nested_struct_padding_and_sibling_boundaries() {
-        #[repr(C)]
-        struct Outer {
-            nested: NestedU8U32x2,
-            tail: u16,
-        }
-
-        let ty = Type::create_struct(vec![NestedU8U32x2::ffi_type(), Type::U16]).unwrap();
-        let nodes = layout_nodes(&ty);
-        assert_node_metadata(
-            &nodes,
-            &[
-                expected_node::<Outer>(0, 7),
-                expected_node::<NestedU8U32x2>(offset_of!(Outer, nested), 6),
-                expected_node::<u8>(offset_of!(NestedU8U32x2, tag), 3),
-                expected_node::<U32x2>(offset_of!(NestedU8U32x2, x), 6),
-                expected_node::<u32>(offset_of!(U32x2, a), 5),
-                expected_node::<u32>(offset_of!(U32x2, b), 6),
-                expected_node::<u16>(offset_of!(Outer, tail), 7),
-            ],
-        );
-        assert_eq!(nodes[2].ty, TypeRef::Scalar(ScalarType::U8));
-        assert_eq!(nodes[4].ty, TypeRef::Scalar(ScalarType::U32));
-        assert_eq!(nodes[6].ty, TypeRef::Scalar(ScalarType::U16));
-    }
-
-    #[test]
-    fn layout_nodes_keep_union_variant_offsets_relative_to_the_union() {
-        let ty = NestedU8UnionU64F64::ffi_type();
-        let nodes = layout_nodes(&ty);
-        assert_node_metadata(
-            &nodes,
-            &[
-                expected_node::<NestedU8UnionU64F64>(0, 5),
-                expected_node::<u8>(offset_of!(NestedU8UnionU64F64, tag), 2),
-                expected_node::<UnionU64F64>(offset_of!(NestedU8UnionU64F64, x), 5),
-                expected_node::<u64>(offset_of!(UnionU64F64, i), 4),
-                expected_node::<f64>(offset_of!(UnionU64F64, f), 5),
-            ],
-        );
-
-        let ty = UnionNestedF32x2U64::ffi_type();
-        let nodes = layout_nodes(&ty);
-        assert_node_metadata(
-            &nodes,
-            &[
-                expected_node::<UnionNestedF32x2U64>(0, 6),
-                expected_node::<F32x2>(offset_of!(UnionNestedF32x2U64, f), 4),
-                expected_node::<f32>(offset_of!(F32x2, a), 3),
-                expected_node::<f32>(offset_of!(F32x2, b), 4),
-                expected_node::<U64>(offset_of!(UnionNestedF32x2U64, i), 6),
-                expected_node::<u64>(offset_of!(U64, a), 6),
-            ],
-        );
-    }
-
-    #[test]
-    fn layout_nodes_into_replaces_nodes_without_reallocating_sufficient_storage() {
-        let original = Type::create_struct(vec![Type::U8; 17]).unwrap();
-        let smaller = NestedU8UnionU64F64::ffi_type();
-        let scalar = Type::U128;
-        let mut nodes = layout_nodes(&original);
-        let capacity = nodes.capacity();
-        let pointer = nodes.as_ptr();
-        assert_eq!(nodes.len(), 18);
-        assert_eq!(nodes[0].layout.size, 17);
-
-        for (ty, node_count) in [(&smaller, 5), (&scalar, 1), (&original, 18)] {
-            TypeRef::from(ty).layout_nodes_into(&mut nodes);
-            assert_eq!(nodes.len(), node_count);
-            assert_eq!(nodes.capacity(), capacity);
-            assert_eq!(nodes.as_ptr(), pointer);
-            assert_eq!(nodes[0].ty, TypeRef::from(ty));
-            assert_eq!(nodes[0].layout, ty.layout());
-            assert_eq!(nodes[0].offset_in_parent, 0);
-            assert_eq!(nodes[0].subtree_end, node_count);
-        }
     }
 
     #[test]
@@ -1095,18 +916,17 @@ mod tests {
                 };
                 assert_eq!(members.as_ptr(), members_pointer);
                 assert_eq!(view.layout(), expected_layout);
-                let mut nodes = Vec::new();
-                view.layout_nodes_into(&mut nodes);
-                assert_eq!(nodes[0].layout, expected_layout);
-                assert_eq!(nodes[1].ty, TypeRef::Scalar(ScalarType::U8));
-                let TypeRef::Struct(nested) = nodes[2].ty else {
+                assert_eq!(TypeRef::from(&members[0]), TypeRef::Scalar(ScalarType::U8));
+                let TypeRef::Struct(nested) = TypeRef::from(&members[1]) else {
                     unreachable!()
                 };
                 assert_eq!(nested.as_ptr(), nested_pointer);
-                assert_eq!(nodes[3].ty, TypeRef::Scalar(ScalarType::F32));
-                assert_eq!(nodes[3].layout.size, size_of::<f32>());
-                assert_eq!(nodes[4].ty, TypeRef::Scalar(ScalarType::U16));
-                assert_eq!(nodes[4].layout.size, size_of::<u16>());
+                let f32_view = TypeRef::from(&nested[0]);
+                assert_eq!(f32_view, TypeRef::Scalar(ScalarType::F32));
+                assert_eq!(f32_view.layout().size, size_of::<f32>());
+                let u16_view = TypeRef::from(&nested[1]);
+                assert_eq!(u16_view, TypeRef::Scalar(ScalarType::U16));
+                assert_eq!(u16_view.layout().size, size_of::<u16>());
             };
 
             check_view(TypeRef::from(&ty));

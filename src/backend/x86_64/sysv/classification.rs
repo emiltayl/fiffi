@@ -1,9 +1,97 @@
-extern crate alloc;
+use crate::types::{FfiTypeLayout, ScalarType, TypeRef};
 
-#[cfg(not(test))]
-use alloc::vec::Vec;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RegisterSummary {
+    layout: FfiTypeLayout,
+    integer_bytes: u16,
+    sse_bytes: u16,
+}
 
-use crate::types::{FfiTypeLayout, LayoutNode, ScalarType, TypeRef};
+impl RegisterSummary {
+    fn for_type(ty: TypeRef<'_>) -> Self {
+        match ty {
+            TypeRef::Scalar(scalar) => Self::for_scalar(scalar),
+            TypeRef::Struct(fields) => {
+                let mut summary = Self::empty();
+
+                for field in fields {
+                    let child = Self::for_type(TypeRef::from(field));
+                    let offset = summary.layout.append_field(child.layout);
+                    summary.include_at(child, offset);
+                }
+
+                summary.layout.pad_to_alignment();
+                summary
+            }
+            TypeRef::Union(variants) => {
+                let mut summary = Self::empty();
+
+                for variant in variants {
+                    let child = Self::for_type(TypeRef::from(variant));
+                    summary.layout.include_variant(child.layout);
+                    summary.integer_bytes |= child.integer_bytes;
+                    summary.sse_bytes |= child.sse_bytes;
+                }
+
+                summary.layout.pad_to_alignment();
+                summary
+            }
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            layout: FfiTypeLayout { align: 1, size: 0 },
+            integer_bytes: 0,
+            sse_bytes: 0,
+        }
+    }
+
+    fn for_scalar(scalar: ScalarType) -> Self {
+        let layout = TypeRef::Scalar(scalar).layout();
+        let occupied_bytes = u16::MAX >> (16 - layout.size);
+
+        match scalar {
+            ScalarType::I8
+            | ScalarType::U8
+            | ScalarType::I16
+            | ScalarType::U16
+            | ScalarType::I32
+            | ScalarType::U32
+            | ScalarType::I64
+            | ScalarType::U64
+            | ScalarType::I128
+            | ScalarType::U128
+            | ScalarType::Isize
+            | ScalarType::Usize
+            | ScalarType::Pointer => Self {
+                layout,
+                integer_bytes: occupied_bytes,
+                sse_bytes: 0,
+            },
+            ScalarType::F32 | ScalarType::F64 => Self {
+                layout,
+                integer_bytes: 0,
+                sse_bytes: occupied_bytes,
+            },
+        }
+    }
+
+    fn include_at(&mut self, child: Self, offset: usize) {
+        self.integer_bytes |= child.integer_bytes << offset;
+        self.sse_bytes |= child.sse_bytes << offset;
+    }
+
+    fn eightbyte_class(self, byte_mask: u16) -> EightbyteClass {
+        if self.integer_bytes & byte_mask != 0 {
+            EightbyteClass::Integer
+        } else if self.sse_bytes & byte_mask != 0 {
+            EightbyteClass::Sse
+        } else {
+            EightbyteClass::NoClass
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ValueClass {
@@ -17,90 +105,16 @@ pub(super) enum ValueClass {
 }
 
 impl ValueClass {
-    pub(super) fn classify<'ty>(
-        ty: TypeRef<'ty>,
-        layout: &FfiTypeLayout,
-        scratch: &mut Vec<LayoutNode<'ty>>,
-    ) -> Self {
+    pub(super) fn classify(ty: TypeRef<'_>, layout: &FfiTypeLayout) -> Self {
         if layout.size > 16 {
-            scratch.clear();
             return Self::Memory;
         }
 
-        let mut eightbyte_classes = [EightbyteClass::NoClass; 2];
-        match ty {
-            TypeRef::Struct(_) | TypeRef::Union(_) => {
-                ty.layout_nodes_into(scratch);
-                debug_assert_eq!(scratch[0].layout, *layout);
-                Self::classify_into_eightbytes(scratch, 0, 0, &mut eightbyte_classes);
-            }
-            TypeRef::Scalar(scalar) => {
-                scratch.clear();
-                Self::classify_scalar_into_eightbytes(scalar, 0, &mut eightbyte_classes);
-            }
-        }
-        Self::from_eightbyte_classes(eightbyte_classes)
-    }
-
-    fn classify_into_eightbytes(
-        nodes: &[LayoutNode<'_>],
-        node_index: usize,
-        base_offset: usize,
-        eightbyte_classes: &mut [EightbyteClass; 2],
-    ) {
-        let node = &nodes[node_index];
-        match node.ty {
-            TypeRef::Struct(_) | TypeRef::Union(_) => {
-                let mut child_index = node_index + 1;
-                while child_index < node.subtree_end {
-                    let child = &nodes[child_index];
-                    Self::classify_into_eightbytes(
-                        nodes,
-                        child_index,
-                        base_offset + child.offset_in_parent,
-                        eightbyte_classes,
-                    );
-                    // Skip the already-classified subtree directly to the next sibling.
-                    child_index = child.subtree_end;
-                }
-            }
-            TypeRef::Scalar(scalar) => {
-                Self::classify_scalar_into_eightbytes(scalar, base_offset, eightbyte_classes);
-            }
-        }
-    }
-
-    fn classify_scalar_into_eightbytes(
-        ty: ScalarType,
-        base_offset: usize,
-        eightbyte_classes: &mut [EightbyteClass; 2],
-    ) {
-        // Natural alignment keeps scalars within one eightbyte, except 128-bit integers.
-        let eightbyte_index = base_offset / 8;
-
-        match ty {
-            ScalarType::I8
-            | ScalarType::U8
-            | ScalarType::I16
-            | ScalarType::U16
-            | ScalarType::I32
-            | ScalarType::U32
-            | ScalarType::I64
-            | ScalarType::U64
-            | ScalarType::Isize
-            | ScalarType::Usize
-            | ScalarType::Pointer => {
-                eightbyte_classes[eightbyte_index].merge_with(EightbyteClass::Integer);
-            }
-            ScalarType::F32 | ScalarType::F64 => {
-                eightbyte_classes[eightbyte_index].merge_with(EightbyteClass::Sse);
-            }
-            ScalarType::I128 | ScalarType::U128 => {
-                debug_assert_eq!(base_offset, 0);
-                eightbyte_classes[0] = EightbyteClass::Integer;
-                eightbyte_classes[1] = EightbyteClass::Integer;
-            }
-        }
+        let summary = RegisterSummary::for_type(ty);
+        Self::from_eightbyte_classes([
+            summary.eightbyte_class(0x00ff),
+            summary.eightbyte_class(0xff00),
+        ])
     }
 
     fn from_eightbyte_classes(eightbyte_classes: [EightbyteClass; 2]) -> Self {
@@ -123,17 +137,6 @@ enum EightbyteClass {
     Sse,
     NoClass,
 }
-
-impl EightbyteClass {
-    fn merge_with(&mut self, other: EightbyteClass) {
-        *self = match (*self, other) {
-            (_, EightbyteClass::Integer) | (EightbyteClass::Integer, _) => EightbyteClass::Integer,
-            (EightbyteClass::Sse, _) | (_, EightbyteClass::Sse) => EightbyteClass::Sse,
-            // Only scalar classes are merged into the accumulator.
-            (EightbyteClass::NoClass, EightbyteClass::NoClass) => unreachable!(),
-        }
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,7 +155,7 @@ mod tests {
     use crate::types::{FfiType, Type, VariadicType};
 
     fn classify(ty: &Type) -> ValueClass {
-        ValueClass::classify(TypeRef::from(ty), &ty.layout(), &mut Vec::new())
+        ValueClass::classify(TypeRef::from(ty), &ty.layout())
     }
 
     fn assert_ffi_class<T: FfiType>(expected: ValueClass) {
@@ -179,13 +182,11 @@ mod tests {
             (Type::U128, ValueClass::IntegerInteger),
         ];
 
-        let mut scratch = Vec::new();
         for (ty, expected) in &cases {
             assert_eq!(
-                ValueClass::classify(TypeRef::from(ty), &ty.layout(), &mut scratch),
+                ValueClass::classify(TypeRef::from(ty), &ty.layout()),
                 *expected
             );
-            assert_eq!(scratch.capacity(), 0);
         }
     }
 
@@ -263,15 +264,29 @@ mod tests {
             assert_eq!(classify(&integer_dominates), ValueClass::Integer);
         }
 
-        let floating_union = Type::create_union_from_slice(&[Type::F64]).unwrap();
-        let union_at_nonzero_offset =
-            Type::create_struct_from_slice(&[Type::U64, floating_union]).unwrap();
-        assert_eq!(classify(&union_at_nonzero_offset), ValueClass::IntegerSse);
+        let float_fields = Type::create_struct(vec![Type::F32; 3]).unwrap();
+        let integer_and_float = Type::create_struct(vec![Type::U8, Type::F64]).unwrap();
+        for variants in [
+            vec![float_fields.clone(), integer_and_float.clone()],
+            vec![integer_and_float, float_fields],
+        ] {
+            let union = Type::create_union(variants).unwrap();
+            assert_eq!(classify(&union), ValueClass::IntegerSse);
+        }
 
-        let floating_union = Type::create_union_from_slice(&[Type::F64]).unwrap();
-        let union_before_integer =
-            Type::create_struct_from_slice(&[floating_union, Type::U64]).unwrap();
-        assert_eq!(classify(&union_before_integer), ValueClass::SseInteger);
+        for variants in [vec![Type::F64, Type::U64], vec![Type::U64, Type::F64]] {
+            let union = Type::create_union(variants).unwrap();
+            let nested = Type::create_struct(vec![Type::F64, union]).unwrap();
+            assert_eq!(classify(&nested), ValueClass::SseInteger);
+        }
+
+        let two_f64 = Type::create_struct(vec![Type::F64; 2]).unwrap();
+        let small_integer_alternative = Type::create_union(vec![Type::U8, two_f64]).unwrap();
+        assert_eq!(classify(&small_integer_alternative), ValueClass::IntegerSse);
+
+        let many_alternatives = Type::create_union(vec![Type::F64; 512]).unwrap();
+        assert_eq!(many_alternatives.layout(), Type::F64.layout());
+        assert_eq!(classify(&many_alternatives), ValueClass::Sse);
     }
 
     #[test]
@@ -280,28 +295,37 @@ mod tests {
         assert_eq!(classify(&inner), ValueClass::Integer);
         let outer = Type::create_struct(vec![Type::F32, inner]).unwrap();
         assert_eq!(classify(&outer), ValueClass::IntegerSse);
+
+        let reversed_inner = Type::create_struct(vec![Type::F32, Type::U32]).unwrap();
+        assert_eq!(classify(&reversed_inner), ValueClass::Integer);
+        let reversed_outer = Type::create_struct(vec![Type::F32, reversed_inner]).unwrap();
+        assert_eq!(classify(&reversed_outer), ValueClass::SseInteger);
     }
 
     #[test]
-    fn aggregates_at_the_size_cutoff_only_prepare_register_values() {
+    fn full_width_masks_and_aggregate_size_cutoff() {
+        for scalar in [Type::I128, Type::U128] {
+            assert_eq!(classify(&scalar), ValueClass::IntegerInteger);
+            let wrapped = Type::create_struct(vec![scalar]).unwrap();
+            assert_eq!(classify(&wrapped), ValueClass::IntegerInteger);
+        }
+
         let sixteen_bytes = Type::create_struct(vec![Type::U8; 16]).unwrap();
         let seventeen_bytes = Type::create_struct(vec![Type::U8; 17]).unwrap();
-        let large_union = Type::create_union(vec![seventeen_bytes.clone(), Type::U128]).unwrap();
+        let seventeen_byte_union = Type::create_union(vec![seventeen_bytes.clone()]).unwrap();
+        let alignment_enlarged_union =
+            Type::create_union(vec![seventeen_bytes.clone(), Type::U128]).unwrap();
         let cases = [
             (&sixteen_bytes, 16, ValueClass::IntegerInteger),
             (&seventeen_bytes, 17, ValueClass::Memory),
-            (&large_union, 32, ValueClass::Memory),
+            (&seventeen_byte_union, 17, ValueClass::Memory),
+            (&alignment_enlarged_union, 32, ValueClass::Memory),
         ];
 
         for (ty, size, expected) in cases {
             let layout = ty.layout();
             assert_eq!(layout.size, size);
-            let mut scratch = Vec::new();
-            assert_eq!(
-                ValueClass::classify(TypeRef::from(ty), &layout, &mut scratch),
-                expected
-            );
-            assert_eq!(scratch.capacity() > 0, size <= 16);
+            assert_eq!(ValueClass::classify(TypeRef::from(ty), &layout), expected);
         }
     }
 
@@ -315,22 +339,15 @@ mod tests {
 
             let layout = ty.layout();
             assert_eq!(layout, Type::F64.layout());
-            let mut scratch = Vec::new();
             assert_eq!(
-                ValueClass::classify(TypeRef::from(&ty), &layout, &mut scratch),
+                ValueClass::classify(TypeRef::from(&ty), &layout),
                 ValueClass::Sse,
             );
-            assert_eq!(scratch.len(), depth + 1);
-            for node in &scratch {
-                assert_eq!(node.layout, layout);
-                assert_eq!(node.offset_in_parent, 0);
-                assert_eq!(node.subtree_end, scratch.len());
-            }
         }
     }
 
     #[test]
-    fn scratch_is_cleared_and_reused_across_different_value_shapes() {
+    fn signature_type_views_classify_independently() {
         let return_type = Type::create_struct(vec![
             Type::F32,
             Type::create_struct(vec![Type::U32, Type::F32]).unwrap(),
@@ -344,72 +361,21 @@ mod tests {
         ];
         let signature =
             CallSignature::variadic(&argument_types, &variadic_types, Some(&return_type));
-        let mut scratch = Vec::new();
         let return_view = signature.return_type().unwrap();
         assert_eq!(
-            ValueClass::classify(return_view, &return_view.layout(), &mut scratch),
+            ValueClass::classify(return_view, &return_view.layout()),
             ValueClass::IntegerSse,
         );
-        let capacity = scratch.capacity();
-        let pointer = scratch.as_ptr();
         let expected = [
-            (ValueClass::Integer, 0),
-            (ValueClass::Memory, 0),
-            (ValueClass::Sse, 3),
-            (ValueClass::Integer, 2),
-            (ValueClass::Sse, 0),
+            ValueClass::Integer,
+            ValueClass::Memory,
+            ValueClass::Sse,
+            ValueClass::Integer,
+            ValueClass::Sse,
         ];
 
-        for (ty, (class, node_count)) in signature.arguments().zip(expected) {
-            assert_eq!(ValueClass::classify(ty, &ty.layout(), &mut scratch), class);
-            assert_eq!(scratch.capacity(), capacity);
-            assert_eq!(scratch.as_ptr(), pointer);
-            assert_eq!(scratch.len(), node_count);
-            if node_count != 0 {
-                assert_eq!(scratch[0].ty, ty);
-                assert_eq!(scratch[0].subtree_end, node_count);
-            }
-        }
-    }
-
-    #[test]
-    fn merge_with_mutates_receiver_using_class_precedence() {
-        let cases = [
-            (
-                EightbyteClass::NoClass,
-                EightbyteClass::Sse,
-                EightbyteClass::Sse,
-            ),
-            (
-                EightbyteClass::NoClass,
-                EightbyteClass::Integer,
-                EightbyteClass::Integer,
-            ),
-            (
-                EightbyteClass::Sse,
-                EightbyteClass::Sse,
-                EightbyteClass::Sse,
-            ),
-            (
-                EightbyteClass::Sse,
-                EightbyteClass::Integer,
-                EightbyteClass::Integer,
-            ),
-            (
-                EightbyteClass::Integer,
-                EightbyteClass::Sse,
-                EightbyteClass::Integer,
-            ),
-            (
-                EightbyteClass::Integer,
-                EightbyteClass::Integer,
-                EightbyteClass::Integer,
-            ),
-        ];
-
-        for (mut receiver, other, expected) in cases {
-            receiver.merge_with(other);
-            assert_eq!(receiver, expected);
+        for (ty, class) in signature.arguments().zip(expected) {
+            assert_eq!(ValueClass::classify(ty, &ty.layout()), class);
         }
     }
 }

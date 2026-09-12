@@ -5,7 +5,7 @@ use alloc::{boxed::Box, vec::Vec};
 
 use super::classification::ValueClass;
 use crate::backend::CallSignature;
-use crate::types::{LayoutNode, TypeRef};
+use crate::types::TypeRef;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MarshalPlan {
@@ -31,9 +31,7 @@ impl MarshalPlan {
         let mut argument_moves = Vec::with_capacity(signature.argument_count());
         let mut stack_buffer_size: usize = 0;
 
-        let mut classification_scratch = Vec::new();
-        let return_strategy =
-            ReturnStrategy::for_return_type(signature.return_type(), &mut classification_scratch);
+        let return_strategy = ReturnStrategy::for_return_type(signature.return_type());
 
         // Reserve the first GPR for the hidden return pointer if needed.
         if matches!(return_strategy, ReturnStrategy::HiddenPointer { .. }) {
@@ -42,8 +40,7 @@ impl MarshalPlan {
 
         for (argument_index, argument) in signature.arguments().enumerate() {
             let argument_layout = argument.layout();
-            let argument_class =
-                ValueClass::classify(argument, &argument_layout, &mut classification_scratch);
+            let argument_class = ValueClass::classify(argument, &argument_layout);
 
             let allocation = RegisterRequirements::for_value_class(argument_class)
                 .and_then(|requirements| register_allocator.allocate(requirements));
@@ -198,10 +195,7 @@ pub(super) enum ReturnStrategy {
 }
 
 impl ReturnStrategy {
-    fn for_return_type<'ty>(
-        return_type: Option<TypeRef<'ty>>,
-        scratch: &mut Vec<LayoutNode<'ty>>,
-    ) -> Self {
+    fn for_return_type(return_type: Option<TypeRef<'_>>) -> Self {
         let Some(return_type) = return_type else {
             return Self::Void;
         };
@@ -209,7 +203,7 @@ impl ReturnStrategy {
         let return_layout = return_type.layout();
 
         let Some(register_requirements) = RegisterRequirements::for_value_class(
-            ValueClass::classify(return_type, &return_layout, scratch),
+            ValueClass::classify(return_type, &return_layout),
         ) else {
             return Self::HiddenPointer {
                 size: return_layout.size,
