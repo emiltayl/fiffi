@@ -49,33 +49,29 @@ impl MarshalPlan {
                 None => {
                     // Stack arguments appear in argument order, starting at a 16-byte boundary.
                     stack_buffer_size = stack_buffer_size.next_multiple_of(argument_layout.align);
-                    argument_moves.push(ArgumentMove {
+                    argument_moves.push(ArgumentMove::argument_to_stack(
                         argument_index,
-                        destination: ArgumentDestination::Stack {
-                            offset: stack_buffer_size,
-                            size: argument_layout.size,
-                        },
-                    });
+                        stack_buffer_size,
+                        argument_layout.size,
+                    ));
                     stack_buffer_size =
                         (stack_buffer_size + argument_layout.size).next_multiple_of(8);
                 }
                 Some(RegisterAllocation::One(destination)) => {
-                    argument_moves.push(ArgumentMove {
+                    argument_moves.push(destination.into_move(
                         argument_index,
-                        destination: destination.into_destination(0, argument_layout.size),
-                    });
+                        0,
+                        argument_layout.size,
+                    ));
                 }
                 Some(RegisterAllocation::Two(first_destination, second_destination)) => {
-                    argument_moves.push(ArgumentMove {
-                        argument_index,
-                        destination: first_destination.into_destination(0, 8),
-                    });
+                    argument_moves.push(first_destination.into_move(argument_index, 0, 8));
 
-                    argument_moves.push(ArgumentMove {
+                    argument_moves.push(second_destination.into_move(
                         argument_index,
-                        destination: second_destination
-                            .into_destination(8, argument_layout.size - 8),
-                    });
+                        8,
+                        argument_layout.size - 8,
+                    ));
                 }
             }
         }
@@ -90,40 +86,18 @@ impl MarshalPlan {
     }
 }
 
-/// Argument destination and copy range.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(
-    variant_size_differences,
-    reason = "Stack offsets and sizes stay pointer-width while register metadata is compact"
-)]
+/// Argument destination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub(super) enum ArgumentDestination {
     /// Copy part of an argument into a general-purpose register.
-    Gpr {
-        /// Register index.
-        index: u8,
-        /// Byte offset in the source argument.
-        source_offset: u8,
-        /// Source bytes to copy.
-        size: u8,
-    },
+    Gpr = 0,
 
     /// Copy part of an argument into an XMM register.
-    Xmm {
-        /// Register index.
-        index: u8,
-        /// Byte offset in the source argument.
-        source_offset: u8,
-        /// Source bytes to copy.
-        size: u8,
-    },
+    Xmm = 1,
 
     /// Copy the whole argument, starting at source offset zero, into the stack buffer.
-    Stack {
-        /// Byte offset in the stack argument buffer.
-        offset: usize,
-        /// Source bytes to copy.
-        size: usize,
-    },
+    Stack = 2,
 }
 
 /// Argument copy performed before the call.
@@ -132,8 +106,49 @@ pub(super) struct ArgumentMove {
     /// Argument index.
     pub(super) argument_index: usize,
 
-    /// Copy destination and source range.
-    pub(super) destination: ArgumentDestination,
+    /// Source bytes to copy.
+    pub(super) size: usize,
+
+    /// * Bits 0..=2: `ArgumentDestination`.
+    /// Stack: remaining bits hold the byte offset.
+    /// Registers: bits 3..=5 hold the index, bit 6 holds source offset / 8; higher bits are zero.
+    destination: usize,
+}
+
+impl ArgumentMove {
+    const DESTINATION_MASK: usize = 0b111;
+
+    fn argument_to_stack(argument_index: usize, stack_offset: usize, size: usize) -> Self {
+        Self {
+            argument_index,
+            size,
+            destination: stack_offset | ArgumentDestination::Stack as usize,
+        }
+    }
+
+    pub(super) fn destination(&self) -> ArgumentDestination {
+        match self.destination & Self::DESTINATION_MASK {
+            0 => ArgumentDestination::Gpr,
+            1 => ArgumentDestination::Xmm,
+            2 => ArgumentDestination::Stack,
+            _ => unreachable!("invalid argument destination"),
+        }
+    }
+
+    /// Destination byte offset for a stack move.
+    pub(super) fn stack_offset(&self) -> usize {
+        self.destination & !Self::DESTINATION_MASK
+    }
+
+    /// Register slot for a register move.
+    pub(super) fn register_index(&self) -> usize {
+        (self.destination >> 3) & 0b111
+    }
+
+    /// Source byte offset (0 or 8) for a register move.
+    pub(super) fn source_offset(&self) -> usize {
+        ((self.destination >> 6) & 1) * 8
+    }
 }
 
 const ARGUMENT_GPR_COUNT: usize = 6;
@@ -272,22 +287,18 @@ struct AllocatedRegister {
 }
 
 impl AllocatedRegister {
-    fn into_destination(self, source_offset: u8, size: usize) -> ArgumentDestination {
-        let index =
-            u8::try_from(self.index).expect("argument register indices cannot exceed seven");
-        let size = u8::try_from(size).expect("register argument copies cannot exceed eight bytes");
+    fn into_move(self, argument_index: usize, source_offset: u8, size: usize) -> ArgumentMove {
+        let (destination, register_count) = match self.bank {
+            RegisterBank::Gpr => (ArgumentDestination::Gpr, ARGUMENT_GPR_COUNT),
+            RegisterBank::Xmm => (ArgumentDestination::Xmm, ARGUMENT_XMM_COUNT),
+        };
 
-        match self.bank {
-            RegisterBank::Gpr => ArgumentDestination::Gpr {
-                index,
-                source_offset,
-                size,
-            },
-            RegisterBank::Xmm => ArgumentDestination::Xmm {
-                index,
-                source_offset,
-                size,
-            },
+        ArgumentMove {
+            argument_index,
+            size,
+            destination: destination as usize
+                | (self.index << 3)
+                | (usize::from(source_offset / 8) << 6),
         }
     }
 }
@@ -409,33 +420,23 @@ mod tests {
             .argument_moves
             .iter()
             .map(|argument_move| {
-                let (destination, source_offset, size) = match argument_move.destination {
-                    ArgumentDestination::Gpr {
-                        index,
-                        source_offset,
-                        size,
-                    } => (
-                        ExpectedLocation::Gpr(usize::from(index)),
-                        usize::from(source_offset),
-                        usize::from(size),
+                let (destination, source_offset) = match argument_move.destination() {
+                    ArgumentDestination::Gpr => (
+                        ExpectedLocation::Gpr(argument_move.register_index()),
+                        argument_move.source_offset(),
                     ),
-                    ArgumentDestination::Xmm {
-                        index,
-                        source_offset,
-                        size,
-                    } => (
-                        ExpectedLocation::Xmm(usize::from(index)),
-                        usize::from(source_offset),
-                        usize::from(size),
+                    ArgumentDestination::Xmm => (
+                        ExpectedLocation::Xmm(argument_move.register_index()),
+                        argument_move.source_offset(),
                     ),
-                    ArgumentDestination::Stack { offset, size } => {
-                        (ExpectedLocation::Stack(offset), 0, size)
+                    ArgumentDestination::Stack => {
+                        (ExpectedLocation::Stack(argument_move.stack_offset()), 0)
                     }
                 };
                 ExpectedMove {
                     argument_index: argument_move.argument_index,
                     source_offset,
-                    size,
+                    size: argument_move.size,
                     destination,
                 }
             })

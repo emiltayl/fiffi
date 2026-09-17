@@ -4,7 +4,7 @@ use alloc::vec;
 use core::mem::{MaybeUninit, offset_of};
 use core::ptr;
 
-use super::plan::{ArgumentMove, MarshalPlan, ReturnStrategy};
+use super::plan::{ArgumentMoveKind, MarshalPlan, ReturnStrategy};
 use crate::FnPtr;
 use crate::backend::x86_64::Register;
 use crate::backend::x86_64::asm::stack_setup_asm;
@@ -88,48 +88,34 @@ impl CallFrame {
         }
 
         for step in &marshal_plan.argument_moves {
-            let (argument_index, destination) = match *step {
-                ArgumentMove::ArgumentToGpr {
-                    argument_index,
-                    index,
-                    size,
-                } => (
-                    argument_index,
-                    &mut call_frame.gpr_registers[usize::from(index)].0[..usize::from(size)],
-                ),
-                ArgumentMove::ArgumentToXmm {
-                    argument_index,
-                    index,
-                    size,
-                } => (
-                    argument_index,
-                    &mut call_frame.xmm_registers[usize::from(index)].0[..usize::from(size)],
-                ),
-                ArgumentMove::ArgumentToStack {
-                    argument_index,
-                    offset,
-                    size,
-                } => (argument_index, &mut stack_buffer[offset..offset + size]),
-                ArgumentMove::StackAddressToGpr { offset, index } => {
-                    call_frame.gpr_registers[usize::from(index)]
-                        .update_from_bytes(&offset.to_ne_bytes());
+            let destination = match step.kind() {
+                ArgumentMoveKind::StackAddressToGpr => {
+                    call_frame.gpr_registers[step.register_index()]
+                        .update_from_bytes(&step.source.to_ne_bytes());
                     continue;
                 }
-                ArgumentMove::StackAddressToStack {
-                    source_offset,
-                    destination_offset,
-                } => {
-                    let destination = &mut stack_buffer
-                        [destination_offset..destination_offset + size_of::<usize>()];
+                ArgumentMoveKind::StackAddressToStack => {
+                    let offset = step.stack_offset();
+                    let destination = &mut stack_buffer[offset..offset + size_of::<usize>()];
                     for (destination_byte, offset_byte) in
-                        destination.iter_mut().zip(source_offset.to_ne_bytes())
+                        destination.iter_mut().zip(step.source.to_ne_bytes())
                     {
                         destination_byte.write(offset_byte);
                     }
                     continue;
                 }
+                ArgumentMoveKind::ArgumentToGpr => {
+                    &mut call_frame.gpr_registers[step.register_index()].0[..step.size]
+                }
+                ArgumentMoveKind::ArgumentToXmm => {
+                    &mut call_frame.xmm_registers[step.register_index()].0[..step.size]
+                }
+                ArgumentMoveKind::ArgumentToStack => {
+                    let offset = step.stack_offset();
+                    &mut stack_buffer[offset..offset + step.size]
+                }
             };
-            let arg = &args[argument_index];
+            let arg = &args[step.source];
 
             // SAFETY:
             // * The caller provides readable argument storage of the planned size.

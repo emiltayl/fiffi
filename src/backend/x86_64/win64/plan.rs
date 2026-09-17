@@ -80,11 +80,11 @@ impl MarshalPlan {
                 stack_buffer_size = stack_buffer_size.next_multiple_of(16);
                 let argument_copy_offset = stack_buffer_size;
 
-                argument_moves.push(ArgumentMove::ArgumentToStack {
+                argument_moves.push(ArgumentMove::argument_to_stack(
                     argument_index,
-                    size: argument_layout.size,
-                    offset: argument_copy_offset,
-                });
+                    argument_copy_offset,
+                    argument_layout.size,
+                ));
 
                 match &destination {
                     ArgumentDestination::Gpr(index) => {
@@ -134,85 +134,126 @@ enum ArgumentDestination {
 impl ArgumentDestination {
     fn argument_move(self, argument_index: usize, size: usize) -> ArgumentMove {
         match self {
-            Self::Gpr(index) => ArgumentMove::ArgumentToGpr {
+            Self::Gpr(index) => ArgumentMove::register_move(
                 argument_index,
-                index: u8::try_from(index).expect("argument register indices cannot exceed three"),
-                size: u8::try_from(size)
-                    .expect("register argument copies cannot exceed eight bytes"),
-            },
-            Self::Xmm(index) => ArgumentMove::ArgumentToXmm {
-                argument_index,
-                index: u8::try_from(index).expect("argument register indices cannot exceed three"),
-                size: u8::try_from(size)
-                    .expect("register argument copies cannot exceed eight bytes"),
-            },
-            Self::Stack(offset) => ArgumentMove::ArgumentToStack {
-                argument_index,
-                offset,
+                index,
                 size,
-            },
+                ArgumentMoveKind::ArgumentToGpr,
+            ),
+            Self::Xmm(index) => ArgumentMove::register_move(
+                argument_index,
+                index,
+                size,
+                ArgumentMoveKind::ArgumentToXmm,
+            ),
+            Self::Stack(stack_offset) => {
+                ArgumentMove::argument_to_stack(argument_index, stack_offset, size)
+            }
         }
     }
 
-    fn address_move(self, offset: usize) -> ArgumentMove {
+    fn address_move(self, source: usize) -> ArgumentMove {
         match self {
-            Self::Gpr(index) => ArgumentMove::StackAddressToGpr {
-                offset,
-                index: u8::try_from(index).expect("argument register indices cannot exceed three"),
-            },
-            Self::Stack(destination_offset) => ArgumentMove::StackAddressToStack {
-                source_offset: offset,
-                destination_offset,
-            },
+            Self::Gpr(index) => ArgumentMove::register_move(
+                source,
+                index,
+                size_of::<usize>(),
+                ArgumentMoveKind::StackAddressToGpr,
+            ),
+            Self::Stack(stack_offset) => ArgumentMove::stack_move(
+                source,
+                stack_offset,
+                size_of::<usize>(),
+                ArgumentMoveKind::StackAddressToStack,
+            ),
             Self::Xmm(_) => unreachable!("indirect arguments are not passed in vector registers"),
         }
     }
 }
 
+/// Kind of argument bytes or deferred stack address written before the call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(super) enum ArgumentMoveKind {
+    /// Copy argument bytes into a general-purpose register.
+    ArgumentToGpr = 0,
+
+    /// Copy argument bytes into an XMM register.
+    ArgumentToXmm = 1,
+
+    /// Copy argument bytes into a stack slot or indirect copy buffer.
+    ArgumentToStack = 2,
+
+    /// Store a pointer-sized offset in a GPR for the trampoline to rebase.
+    StackAddressToGpr = 3,
+
+    /// Store a pointer-sized offset in a stack slot for the trampoline to rebase.
+    StackAddressToStack = 4,
+}
+
 /// Argument bytes or a deferred stack address written before the call.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum ArgumentMove {
-    /// Copy argument bytes into a general-purpose register.
-    ArgumentToGpr {
-        /// Argument index.
-        argument_index: usize,
-        /// Register slot.
-        index: u8,
-        /// Source bytes to copy.
-        size: u8,
-    },
-    /// Copy argument bytes into an XMM register.
-    ArgumentToXmm {
-        /// Argument index.
-        argument_index: usize,
-        /// Register slot.
-        index: u8,
-        /// Source bytes to copy.
-        size: u8,
-    },
-    /// Copy argument bytes into a stack slot or indirect copy buffer.
-    ArgumentToStack {
-        /// Argument index.
-        argument_index: usize,
-        /// Destination byte offset in the outgoing stack buffer.
-        offset: usize,
-        /// Source bytes to copy.
-        size: usize,
-    },
-    /// Store a pointer-sized offset in a GPR for the trampoline to rebase.
-    StackAddressToGpr {
-        /// Pointee byte offset in the outgoing stack buffer.
-        offset: usize,
-        /// Register slot.
-        index: u8,
-    },
-    /// Store a pointer-sized offset in a stack slot for the trampoline to rebase.
-    StackAddressToStack {
-        /// Pointee byte offset in the outgoing stack buffer.
-        source_offset: usize,
-        /// Destination byte offset in the outgoing stack buffer.
-        destination_offset: usize,
-    },
+pub(super) struct ArgumentMove {
+    /// Argument index for byte copies; pointee stack offset for deferred addresses.
+    pub(super) source: usize,
+
+    /// Bytes copied or written. Address moves always use pointer width.
+    pub(super) size: usize,
+
+    /// Bits 0..=2: `ArgumentMoveKind`.
+    /// Stack: remaining bits hold the byte offset.
+    /// Registers: bits 3..=4 hold the index; all higher bits are zero.
+    destination: usize,
+}
+
+impl ArgumentMove {
+    const KIND_MASK: usize = 0b111;
+
+    fn argument_to_stack(source: usize, stack_offset: usize, size: usize) -> Self {
+        Self::stack_move(
+            source,
+            stack_offset,
+            size,
+            ArgumentMoveKind::ArgumentToStack,
+        )
+    }
+
+    fn stack_move(source: usize, stack_offset: usize, size: usize, kind: ArgumentMoveKind) -> Self {
+        Self {
+            source,
+            size,
+            destination: stack_offset | kind as usize,
+        }
+    }
+
+    fn register_move(source: usize, index: usize, size: usize, kind: ArgumentMoveKind) -> Self {
+        Self {
+            source,
+            size,
+            destination: (index << 3) | kind as usize,
+        }
+    }
+
+    pub(super) fn kind(&self) -> ArgumentMoveKind {
+        match self.destination & Self::KIND_MASK {
+            0 => ArgumentMoveKind::ArgumentToGpr,
+            1 => ArgumentMoveKind::ArgumentToXmm,
+            2 => ArgumentMoveKind::ArgumentToStack,
+            3 => ArgumentMoveKind::StackAddressToGpr,
+            4 => ArgumentMoveKind::StackAddressToStack,
+            _ => unreachable!("invalid argument move kind"),
+        }
+    }
+
+    /// Destination byte offset for a stack move.
+    pub(super) fn stack_offset(&self) -> usize {
+        self.destination & !Self::KIND_MASK
+    }
+
+    /// Register slot for a register move.
+    pub(super) fn register_index(&self) -> usize {
+        (self.destination >> 3) & 0b11
+    }
 }
 
 /// Describes how a function returns its value.
@@ -307,39 +348,42 @@ mod tests {
     use crate::test_utils::structs::{U8x3, U64x2, U64x3};
     use crate::types::{FfiType, Type, VariadicType};
 
+    // Build expected encodings independently of the production constructors and accessors.
     fn argument_move(
         argument_index: usize,
         size: usize,
         destination: ArgumentDestination,
     ) -> ArgumentMove {
         match destination {
-            ArgumentDestination::Gpr(index) => ArgumentMove::ArgumentToGpr {
-                argument_index,
-                index: u8::try_from(index).unwrap(),
-                size: u8::try_from(size).unwrap(),
-            },
-            ArgumentDestination::Xmm(index) => ArgumentMove::ArgumentToXmm {
-                argument_index,
-                index: u8::try_from(index).unwrap(),
-                size: u8::try_from(size).unwrap(),
-            },
-            ArgumentDestination::Stack(offset) => ArgumentMove::ArgumentToStack {
-                argument_index,
-                offset,
+            ArgumentDestination::Gpr(index) => ArgumentMove {
+                source: argument_index,
                 size,
+                destination: index * 8,
+            },
+            ArgumentDestination::Xmm(index) => ArgumentMove {
+                source: argument_index,
+                size,
+                destination: index * 8 + 1,
+            },
+            ArgumentDestination::Stack(stack_offset) => ArgumentMove {
+                source: argument_index,
+                size,
+                destination: stack_offset + 2,
             },
         }
     }
 
-    fn address_move(offset: usize, destination: ArgumentDestination) -> ArgumentMove {
+    fn address_move(source: usize, destination: ArgumentDestination) -> ArgumentMove {
         match destination {
-            ArgumentDestination::Gpr(index) => ArgumentMove::StackAddressToGpr {
-                offset,
-                index: u8::try_from(index).unwrap(),
+            ArgumentDestination::Gpr(index) => ArgumentMove {
+                source,
+                size: size_of::<usize>(),
+                destination: index * 8 + 3,
             },
-            ArgumentDestination::Stack(destination_offset) => ArgumentMove::StackAddressToStack {
-                source_offset: offset,
-                destination_offset,
+            ArgumentDestination::Stack(stack_offset) => ArgumentMove {
+                source,
+                size: size_of::<usize>(),
+                destination: stack_offset + 4,
             },
             ArgumentDestination::Xmm(_) => {
                 panic!("stack addresses cannot be passed in XMM registers")

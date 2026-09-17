@@ -104,25 +104,18 @@ fn copy_destination<'frame>(
     stack_buffer: &'frame mut [MaybeUninit<u8>],
     step: &ArgumentMove,
 ) -> (&'frame mut [MaybeUninit<u8>], usize) {
-    match step.destination {
-        ArgumentDestination::Gpr {
-            index,
-            source_offset,
-            size,
-        } => (
-            &mut call_frame.gpr_registers[usize::from(index)].0[..usize::from(size)],
-            usize::from(source_offset),
+    match step.destination() {
+        ArgumentDestination::Gpr => (
+            &mut call_frame.gpr_registers[step.register_index()].0[..step.size],
+            step.source_offset(),
         ),
-        ArgumentDestination::Xmm {
-            index,
-            source_offset,
-            size,
-        } => (
-            &mut call_frame.xmm_registers[usize::from(index)].0[..usize::from(size)],
-            usize::from(source_offset),
+        ArgumentDestination::Xmm => (
+            &mut call_frame.xmm_registers[step.register_index()].0[..step.size],
+            step.source_offset(),
         ),
-        ArgumentDestination::Stack { offset, size } => {
-            (&mut stack_buffer[offset..offset + size], 0)
+        ArgumentDestination::Stack => {
+            let offset = step.stack_offset();
+            (&mut stack_buffer[offset..offset + step.size], 0)
         }
     }
 }
@@ -672,14 +665,9 @@ mod tests {
             al: 0,
         };
         let mut stack_buffer = [];
-        let invalid_move = ArgumentMove {
-            argument_index: 0,
-            destination: ArgumentDestination::Gpr {
-                index: 0,
-                source_offset: 0,
-                size: 9,
-            },
-        };
+        let plan = MarshalPlan::build(CallSignature::new(&[Type::U64], None));
+        let mut invalid_move = plan.argument_moves[0].clone();
+        invalid_move.size = 9;
 
         let _ = copy_destination(&mut call_frame, &mut stack_buffer, &invalid_move);
     }
