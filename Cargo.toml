@@ -27,7 +27,7 @@ non_ascii_idents = "deny"
 redundant_imports = "warn"
 unit_bindings = "warn"
 unused_qualifications = "warn"
-variant-size-differences = "warn"
+variant_size_differences = "warn"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = 2 }
