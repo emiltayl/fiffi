@@ -235,8 +235,7 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
 
         // Keep the `CallFrame` pointer in a nonvolatile register across the target call.
         "mov r12, rcx",
-        "mov r11, [r12 + {stack_allocation_len_offset}]",
-        stack_setup_asm!("r11"),
+        stack_setup_asm!("[r12 + {stack_allocation_len_offset}]"),
 
         // arguments passed in: rcx, rdx, r8, r9
         // Registers:
