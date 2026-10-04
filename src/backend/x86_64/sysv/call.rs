@@ -1,56 +1,67 @@
-extern crate alloc;
-
-use alloc::vec;
 use core::mem::{MaybeUninit, offset_of};
 use core::ptr;
 
-use super::plan::{ArgumentDestination, ArgumentMove, MarshalPlan, RegisterBank, ReturnStrategy};
+use super::plan::{ArgumentMove, ArgumentMoveKind, MarshalPlan, RegisterBank, ReturnStrategy};
 use crate::FnPtr;
 use crate::backend::x86_64::Register;
 use crate::backend::x86_64::asm::stack_setup_asm;
 use crate::function::{Arg, Ret};
 
-#[derive(Debug)]
-struct CallFrame {
-    /// GPR arguments; the first two slots also hold `rax` and `rdx` returns.
-    gpr_registers: [Register; 6],
-    /// XMM arguments; the first two slots also hold `xmm0` and `xmm1` returns.
-    xmm_registers: [Register; 8],
+// Dispatch uses bit zero to select a register bank and reads Arg as one pointer. Field
+// offsets/strides use offset_of! and size_of! below; the structs need no fixed field order.
+const _: () = {
+    assert!(ArgumentMoveKind::Gpr as u8 == 0);
+    assert!(ArgumentMoveKind::Xmm as u8 == 1);
+    assert!(ArgumentMoveKind::Stack as u8 == 2);
+};
 
-    /// Space required to reserve on the stack. This includes memory required to provide storage
-    /// space for hidden pointer return if we simply want to discard the return value.
+#[derive(Debug)]
+struct CallFrame<'arg> {
+    argument_moves: *const ArgumentMove,
+    argument_move_len: usize,
+    arguments: *const Arg<'arg>,
+
+    /// Hidden return storage address or offset from pre-call `rsp`.
+    /// Only `(0, false)` is absent: offset zero denotes the allocation base.
+    return_pointer: usize,
+    /// Whether `return_pointer` must be added to pre-call `rsp`.
+    return_pointer_is_offset: bool,
+
+    /// Saved bytes returned in `rax` and `rdx`.
+    return_gpr: [Register; 2],
+    /// Saved low eight bytes returned in `xmm0` and `xmm1`.
+    return_xmm: [Register; 2],
+
+    /// Stack arguments and alignment padding, plus storage for a discarded hidden return.
     stack_allocation_len: usize,
 
-    stack_buffer_ptr: *const MaybeUninit<u8>,
-    stack_buffer_len: usize,
     fn_ptr: FnPtr,
 
     /// See [`MarshalPlan::al`].
     al: u8,
 }
 
-impl CallFrame {
-    /// Creates a call frame and marshals the arguments into it.
+impl<'arg> CallFrame<'arg> {
+    /// Records metadata for direct argument reads and the outgoing stack allocation.
     ///
-    /// # Safety
-    ///
-    /// - `marshal_plan`, `args`, and `ret` must match the same signature.
-    /// - Arguments must be readable for their layouts and disjoint from `stack_buffer`.
-    /// - `stack_buffer` must have the planned size.
-    /// - Return storage and `stack_buffer` must outlive use of the frame.
-    unsafe fn new(
+    /// Argument storage is not read here. Invoking the frame requires matching signatures,
+    /// valid descriptor bounds, and live plan, argument array, argument storage, and return
+    /// storage throughout the call.
+    fn new(
         marshal_plan: &MarshalPlan,
         fn_ptr: FnPtr,
-        args: &[Arg<'_>],
+        args: &[Arg<'arg>],
         ret: Option<&Ret<'_>>,
-        stack_buffer: &mut [MaybeUninit<u8>],
     ) -> Self {
         let mut call_frame = Self {
-            gpr_registers: <[Register; 6] as Default>::default(),
-            xmm_registers: <[Register; 8] as Default>::default(),
-            stack_allocation_len: stack_buffer.len(),
-            stack_buffer_ptr: ptr::null(),
-            stack_buffer_len: stack_buffer.len(),
+            argument_moves: marshal_plan.argument_moves.as_ptr(),
+            argument_move_len: marshal_plan.argument_moves.len(),
+            arguments: args.as_ptr(),
+            return_pointer: 0,
+            return_pointer_is_offset: false,
+            return_gpr: <[Register; 2] as Default>::default(),
+            return_xmm: <[Register; 2] as Default>::default(),
+            stack_allocation_len: marshal_plan.stack_allocation_size,
             fn_ptr,
             al: marshal_plan.al,
         };
@@ -62,61 +73,27 @@ impl CallFrame {
         } = marshal_plan.return_strategy
         {
             if let Some(ret) = ret {
-                let ret_ptr_bytes = ret.as_ptr().expose_provenance().to_ne_bytes();
-                call_frame.gpr_registers[0].update_from_bytes(&ret_ptr_bytes);
+                call_frame.return_pointer = ret.as_ptr().expose_provenance();
             } else {
-                // Reserve extra space for the return value if the caller simply wants to discard
-                // the return value. Add an offset to the reserved space in the first argument
-                // register. `invoke` must calculate the exact address.
-                let return_align = 1usize << return_align;
+                // Reserve aligned storage after the plan's allocation for a discarded return.
+                // `invoke` resolves the offset from pre-call `rsp` and passes its address in rdi.
+                let return_align = 1usize
+                    .checked_shl(u32::from(return_align))
+                    .expect("invalid SysV return alignment");
+                debug_assert!(return_align <= 16);
 
                 let ret_ptr_offset = call_frame
                     .stack_allocation_len
-                    .next_multiple_of(return_align);
+                    .checked_next_multiple_of(return_align)
+                    .expect("SysV discarded-return alignment overflow");
 
-                call_frame.gpr_registers[0].update_from_bytes(&ret_ptr_offset.to_ne_bytes());
-                call_frame.stack_allocation_len = ret_ptr_offset + return_size;
+                call_frame.return_pointer = ret_ptr_offset;
+                call_frame.return_pointer_is_offset = true;
+                call_frame.stack_allocation_len = ret_ptr_offset.strict_add(return_size);
             }
         }
 
-        for step in &marshal_plan.argument_moves {
-            let (dst, source_offset) = copy_destination(&mut call_frame, stack_buffer, step);
-            let arg = &args[step.argument_index];
-
-            // SAFETY:
-            // - The signature and plan bound each source copy.
-            // - `dst` is bounds-checked storage disjoint from the arguments.
-            // - `MaybeUninit<u8>` permits uninitialized padding.
-            unsafe {
-                let src = arg.as_ptr().cast::<MaybeUninit<u8>>().add(source_offset);
-                ptr::copy_nonoverlapping(src, dst.as_mut_ptr(), dst.len());
-            }
-        }
-
-        call_frame.stack_buffer_ptr = stack_buffer.as_ptr();
         call_frame
-    }
-}
-
-/// Returns the destination range and source byte offset for an argument copy.
-fn copy_destination<'frame>(
-    call_frame: &'frame mut CallFrame,
-    stack_buffer: &'frame mut [MaybeUninit<u8>],
-    step: &ArgumentMove,
-) -> (&'frame mut [MaybeUninit<u8>], usize) {
-    match step.destination() {
-        ArgumentDestination::Gpr => (
-            &mut call_frame.gpr_registers[step.register_index()].0[..step.size],
-            step.source_offset(),
-        ),
-        ArgumentDestination::Xmm => (
-            &mut call_frame.xmm_registers[step.register_index()].0[..step.size],
-            step.source_offset(),
-        ),
-        ArgumentDestination::Stack => {
-            let offset = step.stack_offset();
-            (&mut stack_buffer[offset..offset + step.size], 0)
-        }
     }
 }
 
@@ -134,8 +111,8 @@ unsafe fn write_register_return(
 ) {
     let ret_ptr = ret.as_ptr();
     let return_register = |bank: RegisterBank, index: usize| match bank {
-        RegisterBank::Gpr => &call_frame.gpr_registers[index],
-        RegisterBank::Xmm => &call_frame.xmm_registers[index],
+        RegisterBank::Gpr => &call_frame.return_gpr[index],
+        RegisterBank::Xmm => &call_frame.return_xmm[index],
     };
 
     match return_strategy {
@@ -144,8 +121,8 @@ unsafe fn write_register_return(
             let register = return_register(bank, 0);
 
             // SAFETY:
-            // - `byte_length` is at most eight bytes, so the the source register is valid as a
-            //   source when reading `byte_length` bytes.
+            // - `byte_length` is at most eight bytes, so the source register is valid as a source
+            //   when reading `byte_length` bytes.
             // - The caller provides `byte_length` writable bytes at `ret`, without overlap.
             unsafe {
                 ptr::copy_nonoverlapping(
@@ -193,17 +170,13 @@ pub(crate) unsafe fn call(
     args: &[Arg<'_>],
     ret: Option<Ret<'_>>,
 ) {
-    let mut stack_buffer = vec![MaybeUninit::<u8>::uninit(); marshal_plan.stack_buffer_size];
+    let mut call_frame = CallFrame::new(marshal_plan, fn_ptr, args, ret.as_ref());
 
     // SAFETY:
-    // - The caller supplies matching arguments and return storage.
-    // - The fresh buffer has the planned size and outlives the invocation.
-    let mut call_frame =
-        unsafe { CallFrame::new(marshal_plan, fn_ptr, args, ret.as_ref(), &mut stack_buffer) };
-
-    // SAFETY:
-    // - The frame and its buffer remain alive throughout the invocation.
-    // - The frame matches the signature and storage supplied by the caller.
+    // - The frame, plan, argument array and storage, and return storage remain alive during the
+    //   call and match the target signature.
+    // - The internal plan supplies valid descriptors, and arguments cannot overlap the fresh
+    //   outgoing stack allocation.
     unsafe {
         invoke(&raw mut call_frame);
     }
@@ -218,13 +191,22 @@ pub(crate) unsafe fn call(
     }
 }
 
-/// Invokes the function described by a call frame.
+/// Invokes a function, reading arguments directly and copying values into its outgoing stack
+/// allocation as directed by the plan.
 ///
 /// # Safety
 ///
-/// - `call_frame` must be writable and outlive the invocation, together with its buffer.
-/// - Register and stack arguments must match the function pointer's `SysV` signature.
-/// - Return storage must be valid for that signature.
+/// * The frame must remain writable for the call.
+/// * Its argument array and storage, and plan metadata must remain readable for the call. Argument
+///   storage must not overlap the outgoing stack allocation.
+/// * The internal plan must supply valid kinds (0, 1, 2), argument indices, and copy bounds. GPR
+///   indices must be below six, XMM indices below eight, and register payloads in `1..=8`. Register
+///   source offsets must be zero or eight, with offset + size within the argument layout. Stack
+///   offsets must have their low three bits clear (zero is valid); offset + size must fit inside
+///   the allocation. Stack copies start at source offset zero and use exact byte counts.
+/// * The allocation size must not wrap the stack address, and supported alignments are at most 16.
+/// * The plan, arguments, and return storage must match the target's ABI and signature.
+/// * Any return storage must remain writable for the signature throughout the call.
 #[unsafe(naked)]
 unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
     core::arch::naked_asm!(
@@ -233,7 +215,18 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         #[cfg(windows)]
         ".seh_proc {__unwind_function}",
 
-        // Preserve nonvolatile registers; `rbp` anchors unwinding while `rsp` moves.
+        // Preserve nonvolatile registers; rbp anchors unwinding while rsp moves.
+        // After push rbp / push r12 / mov rbp, rsp:
+        //   rbp + 16       return address to invoke's caller
+        //   rbp + 8        saved rbp
+        //   rbp            saved r12
+        //   below rbp      dynamic outgoing allocation, including alignment padding
+        // After stack setup, relative to rsp immediately before call r11:
+        //   rsp + 0...     target's stack arguments, with planned alignment gaps
+        //   following     optional aligned discarded-return storage
+        // The call pushes a return address, so target entry rsp is eight bytes lower;
+        // the first stack argument at pre-call rsp + 0 is at target entry rsp + 8.
+        // There is no caller shadow space for nonvolatile saves in this ABI.
         "push rbp",
         #[cfg(not(windows))]
         ".cfi_adjust_cfa_offset 8",
@@ -259,45 +252,258 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         "mov r12, rdi",
         stack_setup_asm!("[r12 + {stack_allocation_len_offset}]"),
 
-        // Copy the stack arguments into the probed allocation.
-        "mov rsi, [r12 + {stack_buffer_ptr_offset}]",
-        "mov rcx, [r12 + {stack_buffer_len_offset}]",
-        "mov rdi, r10",
+        // Registers:
+        // * r10: Current ArgumentMove pointer
+        // * r11: Remaining move count; later the target address
+        // * r12: CallFrame, preserved across the target call
+        // * rsp: Fixed outgoing allocation base throughout marshalling
+        // * xmm8/xmm9/xmm10: Deferred rdi/rsi/rcx argument payloads
+        // * rax: Payload or copy scratch
+        // * rsi: Argument data pointer
+        // * rdi: Packed destination, then register slot or copy destination
+        // * rcx: Kind, size, fragment scratch, or copy count
+        // Preserve populated rdx/r8/r9 and xmm0..xmm7. SysV makes xmm8..xmm15
+        // caller-saved.
+        "mov r10, [r12 + {argument_moves_offset}]",
+        "mov r11, [r12 + {argument_move_len_offset}]",
+
+        "pxor xmm8, xmm8",
+        "pxor xmm9, xmm9",
+        "pxor xmm10, xmm10",
+        "test r11, r11",
+        "jz 3000f",
+
+        "2000:",
+        "mov rdi, [r10 + {move_destination_offset}]",
+        "mov rcx, rdi",
+        "and rcx, {kind_mask}",
+
+        // ArgumentTo(Gpr|Xmm) share code to read the value. This branches if kind is 0 or 1.
+        "cmp rcx, {argument_to_xmm}",
+        "jbe 2100f",
+        // The internal plan guarantees that the remaining kind is ArgumentStack.
+        "jmp 2400f",
+
+        // Shared argument lookup and exact-width loads for both register banks.
+        "2100:",
+        "mov rax, [r10 + {move_source_offset}]",
+        "mov rsi, [r12 + {arguments_offset}]",
+        "mov rsi, [rsi + rax * {arg_stride}]",
+        // Decode the source offset only for register moves, before the loader reuses rcx.
+        "mov rcx, rdi",
+        "shr rcx, {source_offset_shift}",
+        "and rcx, {source_offset_mask}",
+        "lea rsi, [rsi + rcx * {source_offset_scale}]",
+        "mov rcx, [r10 + {move_size_offset}]",
+
+        // Read exactly rcx bytes (1..=8) from rsi into rax, zero-extending short payloads.
+        // Unaligned fragments stay within the source range; padding bits remain in assembly.
+        // Clobber only rax, rcx, and flags, preserving pointers and remaining registers.
+        "cmp rcx, 8",
+        "je 2118f",
+        "cmp rcx, 4",
+        "je 2114f",
+        "cmp rcx, 2",
+        "je 2112f",
+        "cmp rcx, 1",
+        "je 2111f",
+        "cmp rcx, 3",
+        "je 2113f",
+        "cmp rcx, 5",
+        "je 2115f",
+        "cmp rcx, 6",
+        "je 2116f",
+        // The supported-size invariant leaves seven bytes.
+        "mov eax, [rsi]",
+        "movzx ecx, word ptr [rsi + 4]",
+        "shl rcx, 32",
+        "or rax, rcx",
+        "movzx ecx, byte ptr [rsi + 6]",
+        "shl rcx, 48",
+        "or rax, rcx",
+        "jmp 2120f",
+        "2118:",
+        "mov rax, [rsi]",
+        "jmp 2120f",
+        "2114:",
+        "mov eax, [rsi]",
+        "jmp 2120f",
+        "2112:",
+        "movzx eax, word ptr [rsi]",
+        "jmp 2120f",
+        "2111:",
+        "movzx eax, byte ptr [rsi]",
+        "jmp 2120f",
+        "2113:",
+        "movzx eax, word ptr [rsi]",
+        "movzx ecx, byte ptr [rsi + 2]",
+        "shl rcx, 16",
+        "or rax, rcx",
+        "jmp 2120f",
+        "2115:",
+        "mov eax, [rsi]",
+        "movzx ecx, byte ptr [rsi + 4]",
+        "shl rcx, 32",
+        "or rax, rcx",
+        "jmp 2120f",
+        "2116:",
+        "mov eax, [rsi]",
+        "movzx ecx, word ptr [rsi + 4]",
+        "shl rcx, 32",
+        "or rax, rcx",
+
+        "2120:",
+        "test dil, 1",
+        "jz 2700f",
+
+        // Transfer payload bits without floating-point conversion.
+        "2200:",
+        "shr rdi, {register_index_shift}",
+        // Unlike Win64, shifting also includes the source-offset bit.
+        "and rdi, {register_index_mask}",
+        "test rdi, rdi",
+        "jz 2210f",
+        "cmp rdi, 1",
+        "je 2211f",
+        "cmp rdi, 2",
+        "je 2212f",
+        "cmp rdi, 3",
+        "je 2213f",
+        "cmp rdi, 4",
+        "je 2214f",
+        "cmp rdi, 5",
+        "je 2215f",
+        "cmp rdi, 6",
+        "je 2216f",
+        "movq xmm7, rax",
+        "jmp 2900f",
+
+        "2210:",
+        "movq xmm0, rax",
+        "jmp 2900f",
+        "2211:",
+        "movq xmm1, rax",
+        "jmp 2900f",
+        "2212:",
+        "movq xmm2, rax",
+        "jmp 2900f",
+        "2213:",
+        "movq xmm3, rax",
+        "jmp 2900f",
+        "2214:",
+        "movq xmm4, rax",
+        "jmp 2900f",
+        "2215:",
+        "movq xmm5, rax",
+        "jmp 2900f",
+        "2216:",
+        "movq xmm6, rax",
+        "jmp 2900f",
+
+        // Copy exact byte counts, including odd and zero lengths, leaving slot padding untouched.
+        // The ABI requires a clear direction flag; source storage cannot overlap this allocation.
+        "2400:",
+        "mov rax, [r10 + {move_source_offset}]",
+        "mov rsi, [r12 + {arguments_offset}]",
+        "mov rsi, [rsi + rax * {arg_stride}]",
+        "and rdi, {stack_offset_mask}",
+        "lea rdi, [rsp + rdi]",
+        "mov rcx, [r10 + {move_size_offset}]",
+        // If we are moving 8, 4, 2, or 1 bytes, do it with mov instructions instead of `rep movsb`.
+        "cmp rcx, 8",
+        "je 2418f",
+        "cmp rcx, 4",
+        "je 2414f",
+        "cmp rcx, 2",
+        "je 2412f",
+        "cmp rcx, 1",
+        "je 2411f",
+        // All other lengths, including zero.
         "rep movsb",
+        "jmp 2900f",
 
-        // Set up register arguments.
-        "mov rdi, [r12 + {gpr_registers_offset} + {register_size} * 0]",
-        "mov rsi, [r12 + {gpr_registers_offset} + {register_size} * 1]",
-        "mov rdx, [r12 + {gpr_registers_offset} + {register_size} * 2]",
-        "mov rcx, [r12 + {gpr_registers_offset} + {register_size} * 3]",
-        "mov r8, [r12 + {gpr_registers_offset} + {register_size} * 4]",
-        "mov r9, [r12 + {gpr_registers_offset} + {register_size} * 5]",
+        "2418:",
+        "mov rax, [rsi]",
+        "mov [rdi], rax",
+        "jmp 2900f",
+        "2414:",
+        "mov eax, [rsi]",
+        "mov [rdi], eax",
+        "jmp 2900f",
+        "2412:",
+        "movzx eax, word ptr [rsi]",
+        "mov [rdi], ax",
+        "jmp 2900f",
+        "2411:",
+        "movzx eax, byte ptr [rsi]",
+        "mov [rdi], al",
+        "jmp 2900f",
 
-        "movq xmm0, [r12 + {xmm_registers_offset} + {register_size} * 0]",
-        "movq xmm1, [r12 + {xmm_registers_offset} + {register_size} * 1]",
-        "movq xmm2, [r12 + {xmm_registers_offset} + {register_size} * 2]",
-        "movq xmm3, [r12 + {xmm_registers_offset} + {register_size} * 3]",
-        "movq xmm4, [r12 + {xmm_registers_offset} + {register_size} * 4]",
-        "movq xmm5, [r12 + {xmm_registers_offset} + {register_size} * 5]",
-        "movq xmm6, [r12 + {xmm_registers_offset} + {register_size} * 6]",
-        "movq xmm7, [r12 + {xmm_registers_offset} + {register_size} * 7]",
+        // Shared GPR writer for argument payloads.
+        "2700:",
+        "shr rdi, {register_index_shift}",
+        "and rdi, {register_index_mask}",
+        "test rdi, rdi",
+        "jz 2710f",
+        "cmp rdi, 1",
+        "je 2711f",
+        "cmp rdi, 2",
+        "je 2712f",
+        "cmp rdi, 3",
+        "je 2713f",
+        "cmp rdi, 4",
+        "je 2714f",
+        "mov r9, rax",
+        "jmp 2900f",
 
-        // Calculate the offset in `rdi` if needed for hidden return pointer.
-        "mov r11, [r12 + {stack_allocation_len_offset}]",
-        "cmp r11, [r12 + {stack_buffer_len_offset}]",
-        "je 20f",
-        "add rdi, rsp",
+        "2710:",
+        "movq xmm8, rax",
+        "jmp 2900f",
+        "2711:",
+        "movq xmm9, rax",
+        "jmp 2900f",
+        "2712:",
+        "mov rdx, rax",
+        "jmp 2900f",
+        "2713:",
+        "movq xmm10, rax",
+        "jmp 2900f",
+        "2714:",
+        "mov r8, rax",
+        "2900:",
+        // Execute descriptors in plan order, including split arguments and whole spills.
+        "add r10, {move_stride}",
+        "dec r11",
+        "jnz 2000b",
 
-        "20:",
+        // Marshalling is complete: restore pending rdi/rsi/rcx, then any hidden return pointer.
+        "3000:",
+        "movq rdi, xmm8",
+        "movq rsi, xmm9",
+        "movq rcx, xmm10",
+
+        // Deliver hidden return storage after argument marshalling. Resolve offset mode first:
+        // a discarded return can start at rsp + 0, whereas (0, false) denotes no hidden return.
+        "mov rax, [r12 + {return_pointer_offset}]",
+        "cmp byte ptr [r12 + {return_pointer_is_offset_offset}], 0",
+        "je 3010f",
+        "add rax, rsp",
+        "3010:",
+        "test rax, rax",
+        "jz 3020f",
+        "mov rdi, rax",
+        "3020:",
+
+        // Set the vector count after all payload and hidden-pointer work that uses rax.
         "mov al, [r12 + {al_offset}]",
         "mov r11, [r12 + {fn_ptr_offset}]",
         "call r11",
 
         // Save registers used for return values.
-        "mov [r12 + {gpr_registers_offset} + {register_size} * 0], rax",
-        "mov [r12 + {gpr_registers_offset} + {register_size} * 1], rdx",
-        "movq [r12 + {xmm_registers_offset} + {register_size} * 0], xmm0",
-        "movq [r12 + {xmm_registers_offset} + {register_size} * 1], xmm1",
+        "mov [r12 + {return_gpr_offset} + {register_size} * 0], rax",
+        "mov [r12 + {return_gpr_offset} + {register_size} * 1], rdx",
+        "movq [r12 + {return_xmm_offset} + {register_size} * 0], xmm0",
+        "movq [r12 + {return_xmm_offset} + {register_size} * 1], xmm1",
 
         // Restore the stack with a Windows-recognized frame-pointer epilogue.
         "lea rsp, [rbp]",
@@ -316,11 +522,27 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         #[cfg(windows)]
         __unwind_function = sym invoke,
         stack_allocation_len_offset = const offset_of!(CallFrame, stack_allocation_len),
-        stack_buffer_len_offset = const offset_of!(CallFrame, stack_buffer_len),
-        stack_buffer_ptr_offset = const offset_of!(CallFrame, stack_buffer_ptr),
+        argument_moves_offset = const offset_of!(CallFrame, argument_moves),
+        argument_move_len_offset = const offset_of!(CallFrame, argument_move_len),
+        arguments_offset = const offset_of!(CallFrame, arguments),
+        return_pointer_offset = const offset_of!(CallFrame, return_pointer),
+        return_pointer_is_offset_offset = const offset_of!(CallFrame, return_pointer_is_offset),
+        move_source_offset = const offset_of!(ArgumentMove, source),
+        move_size_offset = const offset_of!(ArgumentMove, size),
+        move_destination_offset = const offset_of!(ArgumentMove, destination),
+        move_stride = const size_of::<ArgumentMove>(),
+        arg_stride = const size_of::<Arg<'_>>(),
+        kind_mask = const ArgumentMove::KIND_MASK,
+        stack_offset_mask = const !ArgumentMove::KIND_MASK.cast_signed(),
+        register_index_shift = const ArgumentMove::REGISTER_INDEX_SHIFT,
+        register_index_mask = const ArgumentMove::REGISTER_INDEX_MASK,
+        source_offset_shift = const ArgumentMove::SOURCE_OFFSET_SHIFT,
+        source_offset_mask = const ArgumentMove::SOURCE_OFFSET_MASK,
+        source_offset_scale = const ArgumentMove::SOURCE_OFFSET_SCALE,
+        argument_to_xmm = const ArgumentMoveKind::Xmm as u8,
 
-        gpr_registers_offset = const offset_of!(CallFrame, gpr_registers),
-        xmm_registers_offset = const offset_of!(CallFrame, xmm_registers),
+        return_gpr_offset = const offset_of!(CallFrame, return_gpr),
+        return_xmm_offset = const offset_of!(CallFrame, return_xmm),
         register_size = const size_of::<Register>(),
 
         fn_ptr_offset = const offset_of!(CallFrame, fn_ptr),
@@ -331,10 +553,7 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::CallSignature;
     use crate::fn_ptrize;
-    use crate::test_utils::structs::{U64_F64_ARG, U64F64, U64X2_ARG, U64x2, U64x3};
-    use crate::types::{FfiType, Type};
 
     extern "C" fn unused_target() {}
 
@@ -347,31 +566,30 @@ mod tests {
         })
     }
 
-    fn register_u64(register: &Register) -> u64 {
-        u64::from_ne_bytes(initialized_bytes(&register.0))
-    }
-
     const GPR_RETURN_0: [u8; 8] = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
     const GPR_RETURN_1: [u8; 8] = [0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27];
     const XMM_RETURN_0: [u8; 8] = [0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37];
     const XMM_RETURN_1: [u8; 8] = [0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47];
     const RETURN_SENTINEL: u8 = 0xa5;
 
-    fn synthetic_return_frame() -> CallFrame {
+    fn synthetic_return_frame<'arg>() -> CallFrame<'arg> {
         let mut call_frame = CallFrame {
-            gpr_registers: <[Register; 6] as Default>::default(),
-            xmm_registers: <[Register; 8] as Default>::default(),
+            return_gpr: <[Register; 2] as Default>::default(),
+            return_xmm: <[Register; 2] as Default>::default(),
             stack_allocation_len: 0,
-            stack_buffer_ptr: ptr::null(),
-            stack_buffer_len: 0,
+            argument_moves: ptr::null(),
+            argument_move_len: 0,
+            arguments: ptr::null(),
+            return_pointer: 0,
+            return_pointer_is_offset: false,
             fn_ptr: fn_ptrize!(unused_target),
             al: 0,
         };
 
-        call_frame.gpr_registers[0].update_from_bytes(&GPR_RETURN_0);
-        call_frame.gpr_registers[1].update_from_bytes(&GPR_RETURN_1);
-        call_frame.xmm_registers[0].update_from_bytes(&XMM_RETURN_0);
-        call_frame.xmm_registers[1].update_from_bytes(&XMM_RETURN_1);
+        call_frame.return_gpr[0].update_from_bytes(&GPR_RETURN_0);
+        call_frame.return_gpr[1].update_from_bytes(&GPR_RETURN_1);
+        call_frame.return_xmm[0].update_from_bytes(&XMM_RETURN_0);
+        call_frame.return_xmm[1].update_from_bytes(&XMM_RETURN_1);
 
         call_frame
     }
@@ -506,169 +724,5 @@ mod tests {
             initialized_bytes::<16>(&return_buffer),
             [RETURN_SENTINEL; 16]
         );
-    }
-
-    #[test]
-    fn split_argument_uses_source_offset_for_second_eightbyte() {
-        let marshal_plan = MarshalPlan::build(CallSignature::new(&[U64x2::ffi_type()], None));
-        let args = [Arg::new(&U64X2_ARG)];
-        let ret = None;
-        let mut stack_buffer = vec![MaybeUninit::uninit(); marshal_plan.stack_buffer_size];
-
-        // SAFETY:
-        // - The argument and void return match the plan.
-        // - The separate buffer has the planned size and outlives the frame.
-        let call_frame = unsafe {
-            CallFrame::new(
-                &marshal_plan,
-                fn_ptrize!(unused_target),
-                &args,
-                ret.as_ref(),
-                &mut stack_buffer,
-            )
-        };
-
-        assert_eq!(register_u64(&call_frame.gpr_registers[0]), U64X2_ARG.a);
-        assert_eq!(register_u64(&call_frame.gpr_registers[1]), U64X2_ARG.b);
-    }
-
-    #[test]
-    fn mixed_aggregate_marshals_each_eightbyte_to_its_register_bank() {
-        let marshal_plan = MarshalPlan::build(CallSignature::new(&[U64F64::ffi_type()], None));
-        let args = [Arg::new(&U64_F64_ARG)];
-        let ret = None;
-        let mut stack_buffer = alloc::vec![
-            MaybeUninit::uninit();
-            marshal_plan.stack_buffer_size
-        ];
-
-        // SAFETY:
-        // - The argument and void return match the plan.
-        // - The separate buffer has the planned size and outlives the frame.
-        let call_frame = unsafe {
-            CallFrame::new(
-                &marshal_plan,
-                fn_ptrize!(unused_target),
-                &args,
-                ret.as_ref(),
-                &mut stack_buffer,
-            )
-        };
-
-        assert_eq!(register_u64(&call_frame.gpr_registers[0]), U64_F64_ARG.a);
-        assert_eq!(
-            register_u64(&call_frame.xmm_registers[0]),
-            U64_F64_ARG.b.to_bits()
-        );
-    }
-
-    #[test]
-    fn stack_arguments_preserve_alignment_gaps() {
-        let argument_types = [
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U128,
-        ];
-        let marshal_plan = MarshalPlan::build(CallSignature::new(&argument_types, None));
-        let register_arguments = [1u64, 2, 3, 4, 5, 6];
-        let stack_u64 = 0x1122_3344_5566_7788u64;
-        let stack_u128 = 0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00u128;
-        let args = [
-            Arg::new(&register_arguments[0]),
-            Arg::new(&register_arguments[1]),
-            Arg::new(&register_arguments[2]),
-            Arg::new(&register_arguments[3]),
-            Arg::new(&register_arguments[4]),
-            Arg::new(&register_arguments[5]),
-            Arg::new(&stack_u64),
-            Arg::new(&stack_u128),
-        ];
-        let ret = None;
-        let mut stack_buffer = alloc::vec![MaybeUninit::new(0xa5); marshal_plan.stack_buffer_size];
-
-        // SAFETY:
-        // - The arguments and void return match the plan.
-        // - The separate buffer has the planned size and outlives the frame.
-        let call_frame = unsafe {
-            CallFrame::new(
-                &marshal_plan,
-                fn_ptrize!(unused_target),
-                &args,
-                ret.as_ref(),
-                &mut stack_buffer,
-            )
-        };
-
-        assert_eq!(call_frame.stack_buffer_ptr, stack_buffer.as_ptr());
-        assert_eq!(call_frame.stack_buffer_len, stack_buffer.len());
-        assert_eq!(
-            initialized_bytes::<8>(&stack_buffer[..8]),
-            stack_u64.to_ne_bytes()
-        );
-        assert_eq!(initialized_bytes::<8>(&stack_buffer[8..16]), [0xa5; 8]);
-        assert_eq!(
-            initialized_bytes::<16>(&stack_buffer[16..32]),
-            stack_u128.to_ne_bytes()
-        );
-    }
-
-    #[test]
-    fn hidden_return_pointer_uses_first_gpr_and_shifts_arguments() {
-        let return_type = U64x3::ffi_type();
-        let marshal_plan = MarshalPlan::build(CallSignature::new(&[Type::U64], Some(&return_type)));
-        let argument = 0x0123_4567_89ab_cdefu64;
-        let args = [Arg::new(&argument)];
-        let mut return_value = MaybeUninit::<U64x3>::uninit();
-        let ret = Ret::new(&mut return_value);
-        let return_address = ret.as_ptr().expose_provenance();
-        let ret = Some(ret);
-        let mut stack_buffer = alloc::vec![
-            MaybeUninit::uninit();
-            marshal_plan.stack_buffer_size
-        ];
-
-        // SAFETY:
-        // - The argument and return storage match the plan.
-        // - The separate buffer has the planned size and outlives the frame.
-        let call_frame = unsafe {
-            CallFrame::new(
-                &marshal_plan,
-                fn_ptrize!(unused_target),
-                &args,
-                ret.as_ref(),
-                &mut stack_buffer,
-            )
-        };
-
-        assert_eq!(
-            usize::from_ne_bytes(initialized_bytes(&call_frame.gpr_registers[0].0)),
-            return_address
-        );
-        assert_eq!(register_u64(&call_frame.gpr_registers[1]), argument);
-    }
-
-    #[test]
-    #[should_panic = "range end index 9 out of range for slice of length 8"]
-    fn malformed_destination_panics_before_copying() {
-        let mut call_frame = CallFrame {
-            gpr_registers: <[Register; 6] as Default>::default(),
-            xmm_registers: <[Register; 8] as Default>::default(),
-            stack_allocation_len: 0,
-            stack_buffer_ptr: ptr::null(),
-            stack_buffer_len: 0,
-            fn_ptr: fn_ptrize!(unused_target),
-            al: 0,
-        };
-        let mut stack_buffer = [];
-        let plan = MarshalPlan::build(CallSignature::new(&[Type::U64], None));
-        let mut invalid_move = plan.argument_moves[0].clone();
-        invalid_move.size = 9;
-
-        let _ = copy_destination(&mut call_frame, &mut stack_buffer, &invalid_move);
     }
 }

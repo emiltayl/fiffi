@@ -12,8 +12,8 @@ pub(crate) struct MarshalPlan {
     /// Argument copies and destinations.
     pub(super) argument_moves: Box<[ArgumentMove]>,
 
-    /// Stack argument buffer size in bytes.
-    pub(super) stack_buffer_size: usize,
+    /// Stack arguments and alignment padding in bytes, excluding discarded hidden-return storage.
+    pub(super) stack_allocation_size: usize,
 
     /// How the function returns its value.
     pub(super) return_strategy: ReturnStrategy,
@@ -29,7 +29,7 @@ impl MarshalPlan {
         let mut register_allocator = RegisterAllocator::default();
 
         let mut argument_moves = Vec::with_capacity(signature.argument_count());
-        let mut stack_buffer_size: usize = 0;
+        let mut stack_allocation_size: usize = 0;
 
         let return_strategy = ReturnStrategy::for_return_type(signature.return_type());
 
@@ -38,8 +38,9 @@ impl MarshalPlan {
             register_allocator.allocate(RegisterRequirements::One(RegisterBank::Gpr));
         }
 
-        for (argument_index, argument) in signature.arguments().enumerate() {
+        for (source, argument) in signature.arguments().enumerate() {
             let argument_layout = argument.layout();
+            debug_assert!(argument_layout.align <= 16);
             let argument_class = ValueClass::classify(argument, &argument_layout);
 
             let allocation = RegisterRequirements::for_value_class(argument_class)
@@ -48,29 +49,40 @@ impl MarshalPlan {
             match allocation {
                 None => {
                     // Stack arguments appear in argument order, starting at a 16-byte boundary.
-                    stack_buffer_size = stack_buffer_size.next_multiple_of(argument_layout.align);
+                    stack_allocation_size = stack_allocation_size
+                        .checked_next_multiple_of(argument_layout.align)
+                        .expect("SysV stack allocation alignment overflow");
                     argument_moves.push(ArgumentMove::argument_to_stack(
-                        argument_index,
-                        stack_buffer_size,
+                        source,
+                        stack_allocation_size,
                         argument_layout.size,
                     ));
-                    stack_buffer_size =
-                        (stack_buffer_size + argument_layout.size).next_multiple_of(8);
+                    stack_allocation_size = stack_allocation_size
+                        .strict_add(argument_layout.size)
+                        .checked_next_multiple_of(8)
+                        .expect("SysV stack allocation rounding overflow");
                 }
                 Some(RegisterAllocation::One(destination)) => {
-                    argument_moves.push(destination.into_move(
-                        argument_index,
+                    argument_moves.push(destination.argument_move(
+                        source,
                         0,
+                        argument_layout.size,
                         argument_layout.size,
                     ));
                 }
                 Some(RegisterAllocation::Two(first_destination, second_destination)) => {
-                    argument_moves.push(first_destination.into_move(argument_index, 0, 8));
+                    argument_moves.push(first_destination.argument_move(
+                        source,
+                        0,
+                        8,
+                        argument_layout.size,
+                    ));
 
-                    argument_moves.push(second_destination.into_move(
-                        argument_index,
+                    argument_moves.push(second_destination.argument_move(
+                        source,
                         8,
                         argument_layout.size - 8,
+                        argument_layout.size,
                     ));
                 }
             }
@@ -78,7 +90,7 @@ impl MarshalPlan {
 
         MarshalPlan {
             argument_moves: argument_moves.into_boxed_slice(),
-            stack_buffer_size,
+            stack_allocation_size,
             return_strategy,
             al: u8::try_from(register_allocator.next_xmm_index)
                 .expect("Register allocator allocated > 255 xmm registers"),
@@ -86,17 +98,17 @@ impl MarshalPlan {
     }
 }
 
-/// Argument destination.
+/// Kind of argument bytes written before the call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
-pub(super) enum ArgumentDestination {
+pub(super) enum ArgumentMoveKind {
     /// Copy part of an argument into a general-purpose register.
     Gpr = 0,
 
     /// Copy part of an argument into an XMM register.
     Xmm = 1,
 
-    /// Copy the whole argument, starting at source offset zero, into the stack buffer.
+    /// Copy the whole argument, starting at source offset zero, into the outgoing allocation.
     Stack = 2,
 }
 
@@ -104,50 +116,61 @@ pub(super) enum ArgumentDestination {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ArgumentMove {
     /// Argument index.
-    pub(super) argument_index: usize,
+    pub(super) source: usize,
 
     /// Source bytes to copy.
     pub(super) size: usize,
 
-    /// * Bits 0..=2: `ArgumentDestination`.
-    /// Stack: remaining bits hold the byte offset.
+    /// Bits 0..=2: `ArgumentMoveKind`.
+    /// Stack: remaining bits hold the byte offset from pre-call `rsp`, without shadow space.
     /// Registers: bits 3..=5 hold the index, bit 6 holds source offset / 8; higher bits are zero.
-    destination: usize,
+    pub(super) destination: usize,
 }
 
 impl ArgumentMove {
-    const DESTINATION_MASK: usize = 0b111;
+    pub(super) const KIND_MASK: usize = 0b111;
+    pub(super) const REGISTER_INDEX_SHIFT: usize = 3;
+    pub(super) const REGISTER_INDEX_MASK: usize = 0b111;
+    pub(super) const SOURCE_OFFSET_SHIFT: usize = 6;
+    pub(super) const SOURCE_OFFSET_MASK: usize = 1;
+    pub(super) const SOURCE_OFFSET_SCALE: usize = 8;
 
-    fn argument_to_stack(argument_index: usize, stack_offset: usize, size: usize) -> Self {
+    fn argument_to_stack(source: usize, stack_offset: usize, size: usize) -> Self {
+        // Offsets are relative to pre-call rsp; zero is valid and there is no shadow space.
+        debug_assert_eq!(stack_offset & Self::KIND_MASK, 0);
         Self {
-            argument_index,
+            source,
             size,
-            destination: stack_offset | ArgumentDestination::Stack as usize,
+            destination: stack_offset | ArgumentMoveKind::Stack as usize,
         }
     }
 
-    pub(super) fn destination(&self) -> ArgumentDestination {
-        match self.destination & Self::DESTINATION_MASK {
-            0 => ArgumentDestination::Gpr,
-            1 => ArgumentDestination::Xmm,
-            2 => ArgumentDestination::Stack,
-            _ => unreachable!("invalid argument destination"),
+    fn register_move(
+        source: usize,
+        index: usize,
+        source_offset: usize,
+        size: usize,
+        kind: ArgumentMoveKind,
+    ) -> Self {
+        debug_assert!(matches!(
+            kind,
+            ArgumentMoveKind::Gpr | ArgumentMoveKind::Xmm
+        ));
+        debug_assert!(if kind == ArgumentMoveKind::Gpr {
+            index < ARGUMENT_GPR_COUNT
+        } else {
+            index < ARGUMENT_XMM_COUNT
+        });
+        debug_assert!(matches!(source_offset, 0 | 8));
+        debug_assert!((1..=8).contains(&size));
+
+        Self {
+            source,
+            size,
+            destination: kind as usize
+                | (index << Self::REGISTER_INDEX_SHIFT)
+                | ((source_offset / Self::SOURCE_OFFSET_SCALE) << Self::SOURCE_OFFSET_SHIFT),
         }
-    }
-
-    /// Destination byte offset for a stack move.
-    pub(super) fn stack_offset(&self) -> usize {
-        self.destination & !Self::DESTINATION_MASK
-    }
-
-    /// Register slot for a register move.
-    pub(super) fn register_index(&self) -> usize {
-        (self.destination >> 3) & 0b111
-    }
-
-    /// Source byte offset (0 or 8) for a register move.
-    pub(super) fn source_offset(&self) -> usize {
-        ((self.destination >> 6) & 1) * 8
     }
 }
 
@@ -287,19 +310,20 @@ struct AllocatedRegister {
 }
 
 impl AllocatedRegister {
-    fn into_move(self, argument_index: usize, source_offset: u8, size: usize) -> ArgumentMove {
-        let (destination, register_count) = match self.bank {
-            RegisterBank::Gpr => (ArgumentDestination::Gpr, ARGUMENT_GPR_COUNT),
-            RegisterBank::Xmm => (ArgumentDestination::Xmm, ARGUMENT_XMM_COUNT),
-        };
+    fn argument_move(
+        self,
+        source: usize,
+        source_offset: usize,
+        size: usize,
+        argument_size: usize,
+    ) -> ArgumentMove {
+        debug_assert!(source_offset.strict_add(size) <= argument_size);
 
-        ArgumentMove {
-            argument_index,
-            size,
-            destination: destination as usize
-                | (self.index << 3)
-                | (usize::from(source_offset / 8) << 6),
-        }
+        let kind = match self.bank {
+            RegisterBank::Gpr => ArgumentMoveKind::Gpr,
+            RegisterBank::Xmm => ArgumentMoveKind::Xmm,
+        };
+        ArgumentMove::register_move(source, self.index, source_offset, size, kind)
     }
 }
 
@@ -361,7 +385,7 @@ mod tests {
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct ExpectedMove {
-        argument_index: usize,
+        source: usize,
         source_offset: usize,
         size: usize,
         destination: ExpectedLocation,
@@ -370,25 +394,25 @@ mod tests {
     impl ExpectedMove {
         fn whole_argument(
             argument_types: &[Type],
-            argument_index: usize,
+            source: usize,
             destination: ExpectedLocation,
         ) -> Self {
             Self {
-                argument_index,
+                source,
                 source_offset: 0,
-                size: argument_types[argument_index].layout().size,
+                size: argument_types[source].layout().size,
                 destination,
             }
         }
 
         fn eightbyte(
-            argument_index: usize,
+            source: usize,
             source_offset: usize,
             size: usize,
             destination: ExpectedLocation,
         ) -> Self {
             Self {
-                argument_index,
+                source,
                 source_offset,
                 size,
                 destination,
@@ -400,19 +424,19 @@ mod tests {
         argument_types: &[Type],
         return_type: Option<&Type>,
         expected_moves: &[ExpectedMove],
-        expected_stack_buffer_size: usize,
+        expected_stack_allocation_size: usize,
     ) {
         assert_signature_plan(
             CallSignature::new(argument_types, return_type),
             expected_moves,
-            expected_stack_buffer_size,
+            expected_stack_allocation_size,
         );
     }
 
     fn assert_signature_plan(
         signature: CallSignature<'_>,
         expected_moves: &[ExpectedMove],
-        expected_stack_buffer_size: usize,
+        expected_stack_allocation_size: usize,
     ) -> MarshalPlan {
         let plan = MarshalPlan::build(signature);
 
@@ -420,21 +444,24 @@ mod tests {
             .argument_moves
             .iter()
             .map(|argument_move| {
-                let (destination, source_offset) = match argument_move.destination() {
-                    ArgumentDestination::Gpr => (
-                        ExpectedLocation::Gpr(argument_move.register_index()),
-                        argument_move.source_offset(),
+                // Decode the documented bits independently of constructors/production helpers.
+                let (destination, source_offset) = match argument_move.destination & 0b111 {
+                    0 => (
+                        ExpectedLocation::Gpr((argument_move.destination >> 3) & 0b111),
+                        ((argument_move.destination >> 6) & 1) * 8,
                     ),
-                    ArgumentDestination::Xmm => (
-                        ExpectedLocation::Xmm(argument_move.register_index()),
-                        argument_move.source_offset(),
+                    1 => (
+                        ExpectedLocation::Xmm((argument_move.destination >> 3) & 0b111),
+                        ((argument_move.destination >> 6) & 1) * 8,
                     ),
-                    ArgumentDestination::Stack => {
-                        (ExpectedLocation::Stack(argument_move.stack_offset()), 0)
-                    }
+                    2 => (
+                        ExpectedLocation::Stack(argument_move.destination & !0b111),
+                        0,
+                    ),
+                    _ => panic!("invalid move kind"),
                 };
                 ExpectedMove {
-                    argument_index: argument_move.argument_index,
+                    source: argument_move.source,
                     source_offset,
                     size: argument_move.size,
                     destination,
@@ -442,22 +469,96 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        actual_moves.sort_by_key(|argument_move| {
-            (argument_move.argument_index, argument_move.source_offset)
-        });
+        actual_moves
+            .sort_by_key(|argument_move| (argument_move.source, argument_move.source_offset));
 
         let mut expected_moves = expected_moves.to_vec();
-        expected_moves.sort_by_key(|argument_move| {
-            (argument_move.argument_index, argument_move.source_offset)
-        });
+        expected_moves
+            .sort_by_key(|argument_move| (argument_move.source, argument_move.source_offset));
 
         assert_eq!(actual_moves, expected_moves);
-        assert_eq!(plan.stack_buffer_size, expected_stack_buffer_size);
+        assert_eq!(plan.stack_allocation_size, expected_stack_allocation_size);
         plan
     }
 
     fn struct_type(fields: &[Type]) -> Type {
         Type::create_struct_from_slice(fields).expect("Test struct must contain at least one field")
+    }
+
+    #[test]
+    fn byte_aggregates_preserve_exact_widths_offsets_and_atomic_spills() {
+        for size in 1..=16 {
+            let byte_aggregate = struct_type(&vec![Type::U8; size]);
+            let first_size = size.min(8);
+            let mut expected = vec![ExpectedMove::eightbyte(
+                0,
+                0,
+                first_size,
+                ExpectedLocation::Gpr(0),
+            )];
+            if size > 8 {
+                expected.push(ExpectedMove::eightbyte(
+                    0,
+                    8,
+                    size - 8,
+                    ExpectedLocation::Gpr(1),
+                ));
+            }
+            assert_marshal_plan(core::slice::from_ref(&byte_aggregate), None, &expected, 0);
+
+            // A failed two-register allocation leaves the last GPR for the following scalar.
+            let mut arguments = vec![Type::U64; 5];
+            arguments.push(byte_aggregate);
+            arguments.push(Type::U8);
+            let mut expected: Vec<_> = (0..5)
+                .map(|index| ExpectedMove::eightbyte(index, 0, 8, ExpectedLocation::Gpr(index)))
+                .collect();
+            if size <= 8 {
+                expected.push(ExpectedMove::eightbyte(
+                    5,
+                    0,
+                    size,
+                    ExpectedLocation::Gpr(5),
+                ));
+                expected.push(ExpectedMove::eightbyte(6, 0, 1, ExpectedLocation::Stack(0)));
+                assert_marshal_plan(&arguments, None, &expected, 8);
+            } else {
+                expected.push(ExpectedMove::eightbyte(
+                    5,
+                    0,
+                    size,
+                    ExpectedLocation::Stack(0),
+                ));
+                expected.push(ExpectedMove::eightbyte(6, 0, 1, ExpectedLocation::Gpr(5)));
+                assert_marshal_plan(&arguments, None, &expected, 16);
+            }
+        }
+    }
+
+    #[test]
+    fn register_move_encodings_cover_both_banks_and_all_payload_widths() {
+        for (kind, count) in [(ArgumentMoveKind::Gpr, 6), (ArgumentMoveKind::Xmm, 8)] {
+            for index in 0..count {
+                for source_offset in [0, 8] {
+                    for size in 1..=8 {
+                        let step =
+                            ArgumentMove::register_move(17, index, source_offset, size, kind);
+                        assert_eq!(step.source, 17);
+                        assert_eq!(step.size, size);
+                        assert_eq!(
+                            step.destination,
+                            kind as usize | (index << 3) | ((source_offset / 8) << 6)
+                        );
+                    }
+                }
+            }
+        }
+        for size in 0..=17 {
+            let step = ArgumentMove::argument_to_stack(17, 64, size);
+            assert_eq!(step.destination, 64 | 2);
+            assert_eq!(step.size, size);
+        }
+        assert_eq!(ArgumentMove::argument_to_stack(0, 0, 3).destination, 2);
     }
 
     #[test]

@@ -75,10 +75,6 @@ impl<'arg> Arg<'arg> {
 
         Self(arg_ptr, PhantomData)
     }
-
-    pub(crate) fn as_ptr(&self) -> *mut c_void {
-        self.0
-    }
 }
 
 /// Creates an [`Arg`] from a reference.
