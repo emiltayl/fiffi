@@ -408,10 +408,9 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
         "mov rax, [r12 + {return_pointer_offset}]",
         "test rax, rax",
         "jz 3020f",
+        "lea r11, [rax + rsp]",
         "cmp byte ptr [r12 + {return_pointer_is_offset_offset}], 0",
-        "je 3010f",
-        "add rax, rsp",
-        "3010:",
+        "cmovne rax, r11",
         "mov rcx, rax",
         "3020:",
 
