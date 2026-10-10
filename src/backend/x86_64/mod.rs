@@ -115,7 +115,7 @@ impl Register {
 
 impl Default for Register {
     fn default() -> Self {
-        Self([MaybeUninit::new(0u8); 8])
+        Self([MaybeUninit::uninit(); 8])
     }
 }
 
