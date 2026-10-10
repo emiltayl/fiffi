@@ -6,19 +6,92 @@ macro_rules! call_shape_tests_for_abi {
         )]
         mod call_shapes {
             use core::ffi::c_void;
+            use core::mem::MaybeUninit;
+            use core::ptr;
 
             use crate::function::tests::helpers::call_ffi_fn;
-            use crate::test_utils::I128_ARG;
+            use crate::function::{Function, arg, ret};
+            use crate::test_utils::{I128_ARG, U128_ARG};
             use crate::test_utils::structs::{
                 NESTED_F32X2X2_ARG, NestedF32x2x2, U8X3_ARG, U8x3, U32X2_ARG, U32x2,
-                U64X3_ARG, U64x3,
+                U64X2_ARG, U64X3_ARG, U64x2, U64x3, U128X2_ARG, U128x2,
             };
+            use crate::types::{FfiType, Type};
+
+            #[test]
+            fn stack_alignment_after_an_existing_small_spill() {
+                extern $extern_abi fn capture(
+                    a: u64, b: u64, c: u64, d: u64, e: u64, f: u64,
+                    small: u8, wide: u128, trailing: u64,
+                ) -> u64 {
+                    assert_eq!([a, b, c, d, e, f], [11, 22, 33, 44, 55, 66]);
+                    assert_eq!(small, 0xd7);
+                    assert_eq!(wide, U128_ARG);
+                    assert_eq!(trailing, 0xdead_beef_1234_5678);
+                    trailing ^ u64::from(small)
+                }
+
+                let result = call_ffi_fn!(abi: $abi, capture(
+                    u64 = 11, u64 = 22, u64 = 33, u64 = 44, u64 = 55, u64 = 66,
+                    u8 = 0xd7, u128 = U128_ARG, u64 = 0xdead_beef_1234_5678,
+                ) -> u64);
+                assert_eq!(result, 0xdead_beef_1234_56af);
+            }
+
+            #[test]
+            fn hidden_return_with_atomic_u64x2_rollback() {
+                extern $extern_abi fn capture(
+                    a: u64, b: u64, c: u64, d: u64, pair: U64x2, trailing: u64,
+                ) -> U64x3 {
+                    assert_eq!([a, b, c, d], [11, 22, 33, 44]);
+                    assert_eq!(pair, U64X2_ARG);
+                    assert_eq!(trailing, 0x9876_5432_10ab_cdef);
+                    U64x3 {
+                        a: trailing,
+                        b: 0xa1b2_c3d4_e5f6_7890,
+                        c: 0x1234_5678_9abc_def0,
+                    }
+                }
+
+                let result = call_ffi_fn!(abi: $abi, capture(
+                    u64 = 11, u64 = 22, u64 = 33, u64 = 44,
+                    U64x2 = U64X2_ARG, u64 = 0x9876_5432_10ab_cdef,
+                ) -> U64x3);
+                assert_eq!(result, U64x3 {
+                    a: 0x9876_5432_10ab_cdef,
+                    b: 0xa1b2_c3d4_e5f6_7890,
+                    c: 0x1234_5678_9abc_def0,
+                });
+            }
+
+            #[test]
+            fn hidden_return_with_atomic_u128_rollback() {
+                extern $extern_abi fn capture(
+                    a: u64, b: u64, c: u64, d: u64, pair: u128, trailing: u64,
+                ) -> U64x3 {
+                    assert_eq!([a, b, c, d], [11, 22, 33, 44]);
+                    assert_eq!(pair, U128_ARG);
+                    assert_eq!(trailing, 0x9876_5432_10ab_cdef);
+                    U64x3 {
+                        a: trailing,
+                        b: 0xa1b2_c3d4_e5f6_7890,
+                        c: 0x1234_5678_9abc_def0,
+                    }
+                }
+
+                let result = call_ffi_fn!(abi: $abi, capture(
+                    u64 = 11, u64 = 22, u64 = 33, u64 = 44,
+                    u128 = U128_ARG, u64 = 0x9876_5432_10ab_cdef,
+                ) -> U64x3);
+                assert_eq!(result, U64x3 {
+                    a: 0x9876_5432_10ab_cdef,
+                    b: 0xa1b2_c3d4_e5f6_7890,
+                    c: 0x1234_5678_9abc_def0,
+                });
+            }
 
             #[test]
             fn aggregate_spanning_multiple_stack_pages_roundtrips() {
-                use crate::function::{Function, arg, ret};
-                use crate::types::Type;
-
                 const LENGTH: usize = 3 * 4096 + 1;
 
                 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,13 +128,6 @@ macro_rules! call_shape_tests_for_abi {
 
             #[test]
             fn discard_return_with_mixed_arguments_and_plan_reuse() {
-                use core::mem::MaybeUninit;
-                use core::ptr;
-
-                use crate::function::{Function, arg, ret};
-                use crate::test_utils::structs::{U128X2_ARG, U128x2};
-                use crate::types::{FfiType, Type};
-
                 unsafe extern $extern_abi fn test_callback(
                     first: U128x2,
                     call_count: *mut usize,
@@ -122,12 +188,6 @@ macro_rules! call_shape_tests_for_abi {
 
             #[test]
             fn discard_return_spanning_multiple_stack_pages() {
-                use core::mem::MaybeUninit;
-                use core::ptr;
-
-                use crate::function::{Function, arg, ret};
-                use crate::types::Type;
-
                 const LENGTH: usize = 3 * 4096 + 1;
 
                 #[repr(C)]

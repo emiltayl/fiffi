@@ -104,15 +104,6 @@ impl CallInterface {
 #[repr(align(8))]
 struct Register([MaybeUninit<u8>; 8]);
 
-impl Register {
-    #[cfg(test)]
-    fn update_from_bytes(&mut self, bytes: &[u8]) {
-        for (dst, src) in self.0[..bytes.len()].iter_mut().zip(bytes) {
-            dst.write(*src);
-        }
-    }
-}
-
 impl Default for Register {
     fn default() -> Self {
         Self([MaybeUninit::uninit(); 8])

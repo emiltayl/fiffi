@@ -11,6 +11,23 @@ pub(super) const SHADOW_SPACE_SIZE: usize = 32;
 pub(super) const POINTER_SIZE: usize = size_of::<usize>();
 const STACK_SLOT_SIZE: usize = POINTER_SIZE;
 
+// Separate allocation arithmetic so boundary tests need neither huge type trees nor storage.
+fn outgoing_stack_arguments_end(argument_count: usize, available_slots: usize) -> usize {
+    SHADOW_SPACE_SIZE.strict_add(
+        argument_count
+            .saturating_sub(available_slots)
+            .strict_mul(STACK_SLOT_SIZE),
+    )
+}
+
+fn reserve_indirect_copy(allocation_size: &mut usize, size: usize) -> usize {
+    let offset = allocation_size
+        .checked_next_multiple_of(16)
+        .expect("Win64 indirect-copy alignment overflow");
+    *allocation_size = offset.strict_add(size);
+    offset
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MarshalPlan {
     /// Argument copies and destinations.
@@ -35,13 +52,11 @@ impl MarshalPlan {
         }
 
         // Reserve all stack slots before placing indirect copies after them.
-        let stack_arguments_size = signature
-            .argument_count()
-            .saturating_sub(register_allocator.available_slots())
-            .strict_mul(STACK_SLOT_SIZE);
-
         // All stack offsets are relative to pre-call `rsp`, including shadow space.
-        let stack_arguments_end = SHADOW_SPACE_SIZE.strict_add(stack_arguments_size);
+        let stack_arguments_end = outgoing_stack_arguments_end(
+            signature.argument_count(),
+            register_allocator.available_slots(),
+        );
         let mut next_stack_offset = SHADOW_SPACE_SIZE;
         let mut stack_allocation_size = stack_arguments_end;
 
@@ -74,10 +89,8 @@ impl MarshalPlan {
             if argument_class == ValueClass::Indirect {
                 // Copies and the outgoing stack allocation base are 16-byte aligned.
                 // Revisit this when adding types with greater alignment.
-                stack_allocation_size = stack_allocation_size
-                    .checked_next_multiple_of(16)
-                    .expect("Win64 indirect-copy alignment overflow");
-                let argument_copy_offset = stack_allocation_size;
+                let argument_copy_offset =
+                    reserve_indirect_copy(&mut stack_allocation_size, argument_layout.size);
 
                 debug_assert!(argument_layout.align <= 16);
                 debug_assert_eq!(argument_copy_offset % 16, 0);
@@ -90,8 +103,6 @@ impl MarshalPlan {
                 ));
 
                 argument_moves.push(destination.address_move(argument_copy_offset));
-
-                stack_allocation_size = stack_allocation_size.strict_add(argument_layout.size);
             } else {
                 argument_moves
                     .push(destination.argument_move(argument_index, argument_layout.size));
@@ -354,263 +365,140 @@ impl RegisterSlotAllocator {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::catch_unwind;
+
     use super::*;
-    use crate::test_utils::structs::{U8x3, U64x2, U64x3};
+    use crate::test_utils::structs::{F32, U8x3, U64x2, U64x3};
+    use crate::test_utils::unions::UnionF32U32;
     use crate::types::{FfiType, Type, VariadicType};
 
-    // Build expected encodings independently of the production constructors and accessors.
-    fn argument_move(
-        argument_index: usize,
-        size: usize,
-        destination: ArgumentDestination,
-    ) -> ArgumentMove {
-        match destination {
-            ArgumentDestination::Gpr(index) => ArgumentMove {
-                source: argument_index,
-                size,
-                destination: index * 8,
-            },
-            ArgumentDestination::Xmm(index) => ArgumentMove {
-                source: argument_index,
-                size,
-                destination: index * 8 + 1,
-            },
-            ArgumentDestination::Stack(stack_offset) => ArgumentMove {
-                source: argument_index,
-                size,
-                destination: stack_offset + 2,
-            },
-        }
-    }
-
-    fn address_move(source: usize, destination: ArgumentDestination) -> ArgumentMove {
-        match destination {
-            ArgumentDestination::Gpr(index) => ArgumentMove {
-                source,
-                size: size_of::<usize>(),
-                destination: index * 8 + 4,
-            },
-            ArgumentDestination::Stack(stack_offset) => ArgumentMove {
-                source,
-                size: size_of::<usize>(),
-                destination: stack_offset + 5,
-            },
-            ArgumentDestination::Xmm(_) => {
-                panic!("stack addresses cannot be passed in XMM registers")
-            }
-        }
-    }
-
+    // Private allocation arithmetic cannot be reached with bounded real signatures.
     #[test]
-    fn mixed_arguments_use_shared_positional_register_slots() {
-        let plan = MarshalPlan::build(CallSignature::new(
-            &[Type::U64, Type::F64, Type::U64, Type::F32, Type::F64],
-            None,
-        ));
-
+    fn stack_allocation_checks_slot_multiplication_and_shadow_space_addition() {
+        assert!(catch_unwind(|| outgoing_stack_arguments_end(usize::MAX / 8 + 1, 0)).is_err());
+        assert!(catch_unwind(|| outgoing_stack_arguments_end(usize::MAX / 8, 0)).is_err());
+        assert_eq!(outgoing_stack_arguments_end(0, 4), 32);
+        assert_eq!(outgoing_stack_arguments_end(5, 4), 40);
         assert_eq!(
-            plan,
-            MarshalPlan {
-                argument_moves: alloc::vec![
-                    argument_move(0, 8, ArgumentDestination::Gpr(0)),
-                    argument_move(1, 8, ArgumentDestination::Xmm(1)),
-                    argument_move(2, 8, ArgumentDestination::Gpr(2)),
-                    argument_move(3, 4, ArgumentDestination::Xmm(3)),
-                    argument_move(4, 8, ArgumentDestination::Stack(32)),
-                ]
-                .into_boxed_slice(),
-                stack_allocation_size: 40,
-                return_strategy: ReturnStrategy::Void,
-            }
+            outgoing_stack_arguments_end((usize::MAX - 32) / 8, 0),
+            usize::MAX - 7
         );
     }
 
     #[test]
-    fn hidden_return_pointer_shifts_every_argument_position() {
-        let return_type = U64x3::ffi_type();
-        let return_layout = return_type.layout();
-        let plan = MarshalPlan::build(CallSignature::new(
-            &[Type::U64, Type::F64, Type::U64, Type::F32],
-            Some(&return_type),
-        ));
-
+    fn indirect_copy_allocation_checks_alignment_and_size_addition() {
+        let reserve = |end, size| {
+            let mut allocation = end;
+            let offset = reserve_indirect_copy(&mut allocation, size);
+            (offset, allocation)
+        };
+        assert!(catch_unwind(|| reserve(usize::MAX - 14, 1)).is_err());
+        assert!(catch_unwind(|| reserve(usize::MAX - 15, 16)).is_err());
+        assert_eq!(reserve(40, 3), (48, 51));
+        assert_eq!(reserve(usize::MAX - 15, 15), (usize::MAX - 15, usize::MAX));
         assert_eq!(
-            plan,
-            MarshalPlan {
-                argument_moves: alloc::vec![
-                    argument_move(0, 8, ArgumentDestination::Gpr(1)),
-                    argument_move(1, 8, ArgumentDestination::Xmm(2)),
-                    argument_move(2, 8, ArgumentDestination::Gpr(3)),
-                    argument_move(3, 4, ArgumentDestination::Stack(32)),
-                ]
-                .into_boxed_slice(),
-                stack_allocation_size: 40,
-                return_strategy: ReturnStrategy::HiddenPointer {
-                    size: return_layout.size,
-                    align_log2: u8::try_from(return_layout.align.trailing_zeros())
-                        .expect("`usize::trailing_zeros` will always fit inside an `u8`."),
-                },
-            }
+            reserve(usize::MAX - 31, 16),
+            (usize::MAX - 31, usize::MAX - 15)
         );
+    }
+
+    // Calls cannot reliably expose copy alignment or nonoverlap for under-aligned values.
+    // Inspect only the allocation and pointer relationships, not the complete marshal plan.
+    fn assert_indirect_copies(
+        plan: &MarshalPlan,
+        stack_arguments_end: usize,
+        sources: &[(usize, usize)],
+    ) {
+        let mut previous_end = stack_arguments_end;
+        let mut register_pointer = false;
+        let mut stack_pointer = false;
+        for &(source, size) in sources {
+            let index = plan
+                .argument_moves
+                .iter()
+                .position(|movement| {
+                    movement.source == source
+                        && movement.destination & ArgumentMove::KIND_MASK
+                            == ArgumentMoveKind::ArgumentToStack as usize
+                })
+                .expect("missing indirect copy");
+            let copy = &plan.argument_moves[index];
+            let start = copy.destination & !ArgumentMove::KIND_MASK;
+            assert_eq!(start % 16, 0);
+            assert!(start >= previous_end);
+            assert_eq!(copy.size, size);
+            previous_end = start + size;
+            assert!(previous_end <= plan.stack_allocation_size);
+
+            let pointer = &plan.argument_moves[index + 1];
+            assert_eq!(pointer.source, start);
+            assert_eq!(pointer.size, POINTER_SIZE);
+            let kind = pointer.destination & ArgumentMove::KIND_MASK;
+            if kind == ArgumentMoveKind::StackAddressToGpr as usize {
+                register_pointer = true;
+            } else {
+                assert_eq!(kind, ArgumentMoveKind::StackAddressToStack as usize);
+                let slot = pointer.destination & !ArgumentMove::KIND_MASK;
+                assert!(slot >= SHADOW_SPACE_SIZE && slot + POINTER_SIZE <= stack_arguments_end);
+                stack_pointer = true;
+            }
+        }
+        assert!(register_pointer && stack_pointer);
     }
 
     #[test]
     fn indirect_copies_follow_stack_arguments_and_are_sixteen_byte_aligned() {
-        let plan = MarshalPlan::build(CallSignature::new(
-            &[
-                U8x3::ffi_type(),
-                Type::U64,
-                Type::F64,
-                Type::U64,
-                U64x2::ffi_type(),
-            ],
-            None,
-        ));
-
-        assert_eq!(
-            plan,
-            MarshalPlan {
-                argument_moves: alloc::vec![
-                    argument_move(0, 3, ArgumentDestination::Stack(48)),
-                    address_move(48, ArgumentDestination::Gpr(0)),
-                    argument_move(1, 8, ArgumentDestination::Gpr(1)),
-                    argument_move(2, 8, ArgumentDestination::Xmm(2)),
-                    argument_move(3, 8, ArgumentDestination::Gpr(3)),
-                    argument_move(4, 16, ArgumentDestination::Stack(64)),
-                    address_move(64, ArgumentDestination::Stack(32)),
-                ]
-                .into_boxed_slice(),
-                stack_allocation_size: 80,
-                return_strategy: ReturnStrategy::Void,
-            }
-        );
-    }
-
-    #[test]
-    fn primitive_u128_is_an_indirect_argument_but_an_xmm0_return() {
-        let plan = MarshalPlan::build(CallSignature::new(&[Type::U128], Some(&Type::U128)));
-
-        assert_eq!(
-            plan,
-            MarshalPlan {
-                argument_moves: alloc::vec![
-                    argument_move(0, 16, ArgumentDestination::Stack(32)),
-                    address_move(32, ArgumentDestination::Gpr(0)),
-                ]
-                .into_boxed_slice(),
-                stack_allocation_size: 48,
-                return_strategy: ReturnStrategy::Xmm0 { byte_length: 16 },
-            }
-        );
-    }
-
-    #[test]
-    fn variadic_empty_tail_duplicates_fixed_scalar_floats() {
-        let fixed = [Type::F32, Type::F64];
-        let ordinary = MarshalPlan::build(CallSignature::new(&fixed, None));
-        assert_eq!(
-            &*ordinary.argument_moves,
-            &[
-                argument_move(0, 4, ArgumentDestination::Xmm(0)),
-                argument_move(1, 8, ArgumentDestination::Xmm(1)),
-            ]
-        );
-
-        let variadic = MarshalPlan::build(CallSignature::variadic(&fixed, &[], None));
-        assert_eq!(
-            &*variadic.argument_moves,
-            &[
-                argument_move(0, 4, ArgumentDestination::Gpr(0)),
-                argument_move(0, 4, ArgumentDestination::Xmm(0)),
-                argument_move(1, 8, ArgumentDestination::Gpr(1)),
-                argument_move(1, 8, ArgumentDestination::Xmm(1)),
-            ]
-        );
-        assert_eq!(variadic.stack_allocation_size, 32);
-    }
-
-    #[test]
-    fn variadic_floats_duplicate_register_slots_and_spill_once() {
-        let plan = MarshalPlan::build(CallSignature::variadic(
-            &[Type::F32],
-            &[const { VariadicType::F64 }; 4],
-            None,
-        ));
-        assert_eq!(
-            &*plan.argument_moves,
-            &[
-                argument_move(0, 4, ArgumentDestination::Gpr(0)),
-                argument_move(0, 4, ArgumentDestination::Xmm(0)),
-                argument_move(1, 8, ArgumentDestination::Gpr(1)),
-                argument_move(1, 8, ArgumentDestination::Xmm(1)),
-                argument_move(2, 8, ArgumentDestination::Gpr(2)),
-                argument_move(2, 8, ArgumentDestination::Xmm(2)),
-                argument_move(3, 8, ArgumentDestination::Gpr(3)),
-                argument_move(3, 8, ArgumentDestination::Xmm(3)),
-                argument_move(4, 8, ArgumentDestination::Stack(32)),
-            ]
-        );
-        assert_eq!(plan.stack_allocation_size, 40);
-    }
-
-    #[test]
-    fn variadic_hidden_return_shifts_float_duplicates_and_stack_boundary() {
-        let return_type = U64x3::ffi_type();
-        let plan = MarshalPlan::build(CallSignature::variadic(
-            &[Type::F32],
-            &[const { VariadicType::F64 }; 4],
-            Some(&return_type),
-        ));
-        assert_eq!(
-            &*plan.argument_moves,
-            &[
-                argument_move(0, 4, ArgumentDestination::Gpr(1)),
-                argument_move(0, 4, ArgumentDestination::Xmm(1)),
-                argument_move(1, 8, ArgumentDestination::Gpr(2)),
-                argument_move(1, 8, ArgumentDestination::Xmm(2)),
-                argument_move(2, 8, ArgumentDestination::Gpr(3)),
-                argument_move(2, 8, ArgumentDestination::Xmm(3)),
-                argument_move(3, 8, ArgumentDestination::Stack(32)),
-                argument_move(4, 8, ArgumentDestination::Stack(40)),
-            ]
-        );
-        assert_eq!(plan.stack_allocation_size, 48);
-        assert_eq!(
-            plan.return_strategy,
-            ReturnStrategy::HiddenPointer {
-                size: 24,
-                align_log2: 3
-            }
-        );
-    }
-
-    #[test]
-    fn variadic_aggregates_use_integer_slots_and_aligned_indirect_copies() {
-        let variadic = [
-            VariadicType::create_struct(vec![Type::F32]).unwrap(),
-            VariadicType::create_union(vec![Type::F32, Type::U8]).unwrap(),
-            VariadicType::create_struct(vec![Type::U8; 3]).unwrap(),
-            VariadicType::U128,
-            VariadicType::create_struct(vec![Type::U64; 2]).unwrap(),
+        let arguments = [
+            U8x3::ffi_type(),
+            Type::U64,
+            Type::F64,
+            Type::U64,
+            U64x2::ffi_type(),
         ];
-        let plan = MarshalPlan::build(CallSignature::variadic(&[], &variadic, Some(&Type::U128)));
-        assert_eq!(
-            plan,
-            MarshalPlan {
-                argument_moves: vec![
-                    argument_move(0, 4, ArgumentDestination::Gpr(0)),
-                    argument_move(1, 4, ArgumentDestination::Gpr(1)),
-                    argument_move(2, 3, ArgumentDestination::Stack(48)),
-                    address_move(48, ArgumentDestination::Gpr(2)),
-                    argument_move(3, 16, ArgumentDestination::Stack(64)),
-                    address_move(64, ArgumentDestination::Gpr(3)),
-                    argument_move(4, 16, ArgumentDestination::Stack(80)),
-                    address_move(80, ArgumentDestination::Stack(32)),
-                ]
-                .into_boxed_slice(),
-                stack_allocation_size: 96,
-                return_strategy: ReturnStrategy::Xmm0 { byte_length: 16 },
-            }
-        );
+        let return_type = U64x3::ffi_type();
+        for hidden in [false, true] {
+            let plan = MarshalPlan::build(CallSignature::new(
+                &arguments,
+                hidden.then_some(&return_type),
+            ));
+            let stack_arguments_end = SHADOW_SPACE_SIZE + if hidden { 16 } else { 8 };
+            assert_indirect_copies(
+                &plan,
+                stack_arguments_end,
+                &[(0, size_of::<U8x3>()), (4, size_of::<U64x2>())],
+            );
+        }
+    }
+
+    #[test]
+    fn variadic_indirect_copies_are_aligned_after_stack_slots() {
+        let variadic = [
+            F32::ffi_type(),
+            UnionF32U32::ffi_type(),
+            U8x3::ffi_type(),
+            Type::U128,
+            U64x2::ffi_type(),
+        ]
+        .into_iter()
+        .map(|ty| VariadicType::try_from(ty).unwrap())
+        .collect::<Vec<_>>();
+        let return_type = U64x3::ffi_type();
+        for hidden in [false, true] {
+            let plan = MarshalPlan::build(CallSignature::variadic(
+                &[],
+                &variadic,
+                hidden.then_some(&return_type),
+            ));
+            let stack_arguments_end = SHADOW_SPACE_SIZE + if hidden { 16 } else { 8 };
+            assert_indirect_copies(
+                &plan,
+                stack_arguments_end,
+                &[
+                    (2, size_of::<U8x3>()),
+                    (3, size_of::<u128>()),
+                    (4, size_of::<U64x2>()),
+                ],
+            );
+        }
     }
 }

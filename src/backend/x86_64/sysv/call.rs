@@ -551,177 +551,523 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
 }
 #[cfg(test)]
 mod tests {
+    use std::panic::catch_unwind;
+
     use super::*;
-    use crate::fn_ptrize;
+    use crate::function::Function;
+    use crate::test_utils::GuardedReturn;
+    use crate::test_utils::structs::{
+        F32X3_ARG, F32x3, F64X2_ARG, F64x2, NESTED_F32_F32_U32_ARG, NESTED_F32_U32_F32_ARG,
+        NestedF32F32U32, NestedF32U32F32, U64_F64_ARG, U64F64, U64x3,
+    };
+    use crate::test_utils::unions::{
+        UNION_F32X3_U8_F64_ARG, UNION_U8_F64_F32X3_ARG, UnionF32x3U8F64, UnionU8F64F32x3,
+    };
+    use crate::types::{FfiType, Type, VariadicType};
+    use crate::{VariadicAbi, fn_ptrize};
+
+    // These probes describe concrete SysV entry signatures. Offsets include the return address;
+    // SysV has no shadow space. Only volatile GPRs and XMM registers are modified.
+    #[test]
+    fn variadic_float_aggregate_preserves_partial_second_eightbyte() {
+        #[unsafe(naked)]
+        unsafe extern "sysv64" fn capture(_output: *mut [u64; 3], _value: F32x3, _tail: f64) {
+            core::arch::naked_asm!(
+                "movq rax, xmm0",
+                "mov [rdi], rax",
+                "movd eax, xmm1",
+                "mov [rdi + 8], rax",
+                "movq rax, xmm2",
+                "mov [rdi + 16], rax",
+                "ret",
+            );
+        }
+        let function = Function::variadic_with_abi(
+            fn_ptrize!(capture),
+            &[Type::Pointer],
+            &[
+                VariadicType::try_from(F32x3::ffi_type()).unwrap(),
+                VariadicType::F64,
+            ],
+            None,
+            VariadicAbi::SysV,
+        );
+        let mut output = [0; 3];
+        let pointer = &raw mut output;
+        let tail = -73.5f64;
+        // SAFETY: The explicit SysV signature matches the aggregate, promoted tail, and separate
+        // live output buffer. The probe reads only 4 bytes from the partial second eightbyte.
+        unsafe {
+            function.call(
+                &[Arg::new(&pointer), Arg::new(&F32X3_ARG), Arg::new(&tail)],
+                None,
+            );
+        }
+        assert_eq!(
+            output,
+            [
+                u64::from(F32X3_ARG.a.to_bits()) | (u64::from(F32X3_ARG.b.to_bits()) << 32),
+                u64::from(F32X3_ARG.c.to_bits()),
+                tail.to_bits(),
+            ]
+        );
+    }
+
+    #[test]
+    fn variadic_two_vector_aggregate_spills_before_last_vector_scalar() {
+        #[unsafe(naked)]
+        unsafe extern "sysv64" fn capture(
+            _output: *mut [u64; 10],
+            _a: f64,
+            _b: f64,
+            _c: f64,
+            _d: f64,
+            _e: f64,
+            _f: f64,
+            _g: f64,
+            _pair: F64x2,
+            _tail: f64,
+        ) {
+            core::arch::naked_asm!(
+                "movq rax, xmm0",
+                "mov [rdi + 0], rax",
+                "movq rax, xmm1",
+                "mov [rdi + 8], rax",
+                "movq rax, xmm2",
+                "mov [rdi + 16], rax",
+                "movq rax, xmm3",
+                "mov [rdi + 24], rax",
+                "movq rax, xmm4",
+                "mov [rdi + 32], rax",
+                "movq rax, xmm5",
+                "mov [rdi + 40], rax",
+                "movq rax, xmm6",
+                "mov [rdi + 48], rax",
+                "mov rax, [rsp + 8]",
+                "mov [rdi + 56], rax",
+                "mov rax, [rsp + 16]",
+                "mov [rdi + 64], rax",
+                "movq rax, xmm7",
+                "mov [rdi + 72], rax",
+                "ret",
+            );
+        }
+        let mut fixed = vec![Type::Pointer];
+        fixed.extend(vec![Type::F64; 7]);
+        let function = Function::variadic_with_abi(
+            fn_ptrize!(capture),
+            &fixed,
+            &[
+                VariadicType::try_from(F64x2::ffi_type()).unwrap(),
+                VariadicType::F64,
+            ],
+            None,
+            VariadicAbi::SysV,
+        );
+        let mut output = [0; 10];
+        let pointer = &raw mut output;
+        let floats = [11.25f64, -22.5, 33.75, -44.25, 55.5, -66.75, 77.25];
+        let tail = -89.5f64;
+        let mut args = vec![Arg::new(&pointer)];
+        args.extend(floats.iter().map(Arg::new));
+        args.extend([Arg::new(&F64X2_ARG), Arg::new(&tail)]);
+        // SAFETY: The fixed output and seven floats plus the aggregate and promoted tail match
+        // capture. The pair starts at entry rsp+8; the scalar uses the remaining xmm7.
+        unsafe {
+            function.call(&args, None);
+        }
+        let mut expected = floats.map(f64::to_bits).to_vec();
+        expected.extend([F64X2_ARG.a.to_bits(), F64X2_ARG.b.to_bits(), tail.to_bits()]);
+        assert_eq!(output.as_slice(), expected);
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep entry probes beside their concrete signatures and live buffers."
+    )]
+    fn variadic_mixed_spill_keeps_vector_register_with_and_without_hidden_return() {
+        #[unsafe(naked)]
+        unsafe extern "sysv64" fn capture(
+            _output: *mut [u64; 8],
+            _a: u64,
+            _b: u64,
+            _c: u64,
+            _d: u64,
+            _e: u64,
+            _pair: U64F64,
+            _tail: f64,
+        ) {
+            core::arch::naked_asm!(
+                "mov [rdi], rsi",
+                "mov [rdi + 8], rdx",
+                "mov [rdi + 16], rcx",
+                "mov [rdi + 24], r8",
+                "mov [rdi + 32], r9",
+                "mov rax, [rsp + 8]",
+                "mov [rdi + 40], rax",
+                "mov rax, [rsp + 16]",
+                "mov [rdi + 48], rax",
+                "movq rax, xmm0",
+                "mov [rdi + 56], rax",
+                "ret",
+            );
+        }
+        #[unsafe(naked)]
+        unsafe extern "sysv64" fn capture_hidden(
+            _output: *mut [u64; 8],
+            _a: u64,
+            _b: u64,
+            _c: u64,
+            _d: u64,
+            _pair: U64F64,
+            _tail: f64,
+        ) -> U64x3 {
+            core::arch::naked_asm!(
+                // Hidden pointer rdi, output rsi, four scalars exhaust rdx through r9.
+                "mov [rsi], rdx",
+                "mov [rsi + 8], rcx",
+                "mov [rsi + 16], r8",
+                "mov [rsi + 24], r9",
+                "mov rax, [rsp + 8]",
+                "mov [rsi + 32], rax",
+                "mov [rdi], rax",
+                "mov rax, [rsp + 16]",
+                "mov [rsi + 40], rax",
+                "mov [rdi + 8], rax",
+                "movq rax, xmm0",
+                "mov [rsi + 48], rax",
+                "mov [rdi + 16], rax",
+                "mov rax, rdi",
+                "ret",
+            );
+        }
+        let integers = [0x1122u64, 0x3344, 0x5566, 0x7788, 0x99aa];
+        let tail = -117.5f64;
+        let return_type = U64x3::ffi_type();
+        for hidden in [false, true] {
+            let count = if hidden { 4 } else { 5 };
+            let mut fixed = vec![Type::Pointer];
+            fixed.extend(vec![Type::U64; count]);
+            let function = Function::variadic_with_abi(
+                if hidden {
+                    fn_ptrize!(capture_hidden)
+                } else {
+                    fn_ptrize!(capture)
+                },
+                &fixed,
+                &[
+                    VariadicType::try_from(U64F64::ffi_type()).unwrap(),
+                    VariadicType::F64,
+                ],
+                hidden.then_some(&return_type),
+                VariadicAbi::SysV,
+            );
+            let mut output = [0; 8];
+            let pointer = &raw mut output;
+            let mut args = vec![Arg::new(&pointer)];
+            args.extend(integers[..count].iter().map(Arg::new));
+            args.extend([Arg::new(&U64_F64_ARG), Arg::new(&tail)]);
+            let mut result = GuardedReturn::<U64x3>::new();
+            // SAFETY: The selected entry signature includes the output slot, fixed scalars,
+            // stack pair, vector tail, and optional hidden return. All storage remains live.
+            unsafe {
+                function.call(&args, hidden.then(|| result.ret()));
+            }
+            let mut expected = integers[..count].to_vec();
+            expected.extend([U64_F64_ARG.a, U64_F64_ARG.b.to_bits(), tail.to_bits()]);
+            assert_eq!(&output[..expected.len()], expected);
+            if hidden {
+                // SAFETY: capture_hidden initialized each field of the hidden return.
+                let result = unsafe { result.get() };
+                assert_eq!(
+                    result,
+                    U64x3 {
+                        a: U64_F64_ARG.a,
+                        b: U64_F64_ARG.b.to_bits(),
+                        c: tail.to_bits()
+                    }
+                );
+                output.fill(0);
+                // SAFETY: The same signature and buffers remain live; discarded storage is
+                // provided by Function for all fields written by capture_hidden.
+                unsafe {
+                    function.call(&args, None);
+                }
+                assert_eq!(&output[..expected.len()], expected);
+            }
+        }
+    }
+
+    #[test]
+    fn variadic_nested_and_reversed_union_views_have_independent_return_classes() {
+        #[unsafe(naked)]
+        unsafe extern "sysv64" fn capture(
+            _output: *mut [u64; 4],
+            _nested: NestedF32U32F32,
+            _union: UnionU8F64F32x3,
+        ) -> NestedF32F32U32 {
+            core::arch::naked_asm!(
+                "mov [rdi], rsi", "movd eax, xmm0", "mov [rdi + 8], rax",
+                "movzx eax, dl", "mov [rdi + 16], rax",
+                "movq rax, xmm1", "mov [rdi + 24], rax",
+                // Return has the opposite ordering: xmm0 holds two f32s, eax one u32.
+                "mov rax, {float_bits}", "movq xmm0, rax", "mov eax, {integer}", "ret",
+                float_bits = const (NESTED_F32_F32_U32_ARG.head.to_bits() as u64)
+                    | ((NESTED_F32_F32_U32_ARG.inner.a.to_bits() as u64) << 32),
+                integer = const NESTED_F32_F32_U32_ARG.inner.b,
+            );
+        }
+        // Both concrete union declarations have identical ABI payload layouts.
+        for reversed in [false, true] {
+            let union_type = if reversed {
+                UnionU8F64F32x3::ffi_type()
+            } else {
+                UnionF32x3U8F64::ffi_type()
+            };
+            let function = Function::variadic_with_abi(
+                fn_ptrize!(capture),
+                &[Type::Pointer],
+                &[
+                    VariadicType::try_from(NestedF32U32F32::ffi_type()).unwrap(),
+                    VariadicType::try_from(union_type).unwrap(),
+                ],
+                Some(&NestedF32F32U32::ffi_type()),
+                VariadicAbi::SysV,
+            );
+            let mut output = [0; 4];
+            let pointer = &raw mut output;
+            let mut result = GuardedReturn::<NestedF32F32U32>::new();
+            let union = if reversed {
+                Arg::new(&UNION_U8_F64_F32X3_ARG)
+            } else {
+                Arg::new(&UNION_F32X3_U8_F64_ARG)
+            };
+            // SAFETY: Both unions initialize the U8F64 variant; the probe inspects its byte and
+            // f64 only, avoiding padding. Fixed, variadic and return descriptions are independent.
+            unsafe {
+                function.call(
+                    &[Arg::new(&pointer), Arg::new(&NESTED_F32_U32_F32_ARG), union],
+                    Some(result.ret()),
+                );
+            }
+            let (byte, float) = if reversed {
+                // SAFETY: The fixture initializes mixed.
+                unsafe {
+                    (
+                        UNION_U8_F64_F32X3_ARG.mixed.a,
+                        UNION_U8_F64_F32X3_ARG.mixed.b,
+                    )
+                }
+            } else {
+                // SAFETY: The fixture initializes mixed.
+                unsafe {
+                    (
+                        UNION_F32X3_U8_F64_ARG.mixed.a,
+                        UNION_F32X3_U8_F64_ARG.mixed.b,
+                    )
+                }
+            };
+            assert_eq!(
+                output,
+                [
+                    u64::from(NESTED_F32_U32_F32_ARG.head.to_bits())
+                        | (u64::from(NESTED_F32_U32_F32_ARG.inner.a) << 32),
+                    u64::from(NESTED_F32_U32_F32_ARG.inner.b.to_bits()),
+                    u64::from(byte),
+                    float.to_bits(),
+                ]
+            );
+            // SAFETY: The probe initializes both floating fields and the integer return field.
+            assert_eq!(unsafe { result.get() }, NESTED_F32_F32_U32_ARG);
+        }
+    }
 
     extern "C" fn unused_target() {}
 
-    fn initialized_bytes<const N: usize>(bytes: &[MaybeUninit<u8>]) -> [u8; N] {
-        assert_eq!(bytes.len(), N);
-
-        core::array::from_fn(|index| {
-            // SAFETY: Tests supply initialized bytes without padding.
-            unsafe { *bytes[index].assume_init_ref() }
-        })
-    }
-
-    const GPR_RETURN_0: [u8; 8] = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
-    const GPR_RETURN_1: [u8; 8] = [0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27];
-    const XMM_RETURN_0: [u8; 8] = [0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37];
-    const XMM_RETURN_1: [u8; 8] = [0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47];
-    const RETURN_SENTINEL: u8 = 0xa5;
-
-    fn synthetic_return_frame<'arg>() -> CallFrame<'arg> {
-        let mut call_frame = CallFrame {
-            return_gpr: <[Register; 2] as Default>::default(),
-            return_xmm: <[Register; 2] as Default>::default(),
-            stack_allocation_len: 0,
-            argument_moves: ptr::null(),
-            argument_move_len: 0,
-            arguments: ptr::null(),
-            return_pointer: 0,
-            return_pointer_is_offset: false,
-            fn_ptr: fn_ptrize!(unused_target),
-            al: 0,
+    // Synthetic frames exercise reservation arithmetic only. They are never invoked, and no
+    // synthetic storage is allocated or dereferenced.
+    #[test]
+    fn discarded_hidden_return_reservation_checks_alignment_and_size_overflow() {
+        let frame = |stack_size, size, align_log2| {
+            let plan = MarshalPlan {
+                argument_moves: Box::new([]),
+                stack_allocation_size: stack_size,
+                return_strategy: ReturnStrategy::HiddenPointer { size, align_log2 },
+                al: 0,
+            };
+            CallFrame::new(&plan, fn_ptrize!(unused_target), &[], None)
         };
-
-        call_frame.return_gpr[0].update_from_bytes(&GPR_RETURN_0);
-        call_frame.return_gpr[1].update_from_bytes(&GPR_RETURN_1);
-        call_frame.return_xmm[0].update_from_bytes(&XMM_RETURN_0);
-        call_frame.return_xmm[1].update_from_bytes(&XMM_RETURN_1);
-
-        call_frame
-    }
-
-    #[test]
-    fn single_register_return_copies_only_the_declared_length() {
-        let call_frame = synthetic_return_frame();
-        let cases = [
-            (RegisterBank::Gpr, 5, GPR_RETURN_0),
-            (RegisterBank::Xmm, 3, XMM_RETURN_0),
-        ];
-
-        for (bank, byte_length, expected_register) in cases {
-            let mut return_buffer = [MaybeUninit::new(RETURN_SENTINEL); 16];
-
-            // SAFETY:
-            // - The buffer is large enough and disjoint from the frame.
-            // - Selected registers contain initialized bytes.
-            unsafe {
-                write_register_return(
-                    &call_frame,
-                    ReturnStrategy::SingleRegister { bank, byte_length },
-                    Ret::new(&mut return_buffer),
-                );
-            }
-
-            let actual = initialized_bytes::<16>(&return_buffer);
-            let byte_length = usize::from(byte_length);
-            assert_eq!(&actual[..byte_length], &expected_register[..byte_length]);
-            assert_eq!(
-                &actual[byte_length..],
-                &[RETURN_SENTINEL; 16][byte_length..]
-            );
+        assert!(catch_unwind(|| frame(usize::MAX - 14, 1, 4)).is_err());
+        assert!(catch_unwind(|| frame(usize::MAX - 15, 16, 4)).is_err());
+        for (stack, size, align_log2, expected_offset, expected_len) in [
+            (0, 24, 3, 0, 24),
+            (usize::MAX - 16, 15, 4, usize::MAX - 15, usize::MAX),
+            (0, usize::MAX, 0, 0, usize::MAX),
+        ] {
+            let result = frame(stack, size, align_log2);
+            assert!(result.return_pointer_is_offset);
+            assert_eq!(result.return_pointer, expected_offset);
+            assert_eq!(result.stack_allocation_len, expected_len);
         }
     }
 
     #[test]
-    fn same_bank_two_register_return_uses_slots_zero_and_one() {
-        let call_frame = synthetic_return_frame();
-        let cases = [
-            (RegisterBank::Gpr, GPR_RETURN_0, GPR_RETURN_1),
-            (RegisterBank::Xmm, XMM_RETURN_0, XMM_RETURN_1),
-        ];
-
-        for (bank, expected_first, expected_second) in cases {
-            let mut return_buffer = [MaybeUninit::new(RETURN_SENTINEL); 16];
-
-            // SAFETY:
-            // - The buffer is large enough and disjoint from the frame.
-            // - Selected registers contain initialized bytes.
-            unsafe {
-                write_register_return(
-                    &call_frame,
-                    ReturnStrategy::TwoRegisters {
-                        first_bank: bank,
-                        second_bank: bank,
-                        second_byte_length: 5,
-                    },
-                    Ret::new(&mut return_buffer),
-                );
-            }
-
-            let actual = initialized_bytes::<16>(&return_buffer);
-            assert_eq!(&actual[..8], &expected_first);
-            assert_eq!(&actual[8..13], &expected_second[..5]);
-            assert_eq!(&actual[13..], &[RETURN_SENTINEL; 3]);
-        }
-    }
-
-    #[test]
-    fn mixed_two_register_return_uses_slot_zero_of_each_bank() {
-        let call_frame = synthetic_return_frame();
-        let cases = [
-            (
-                RegisterBank::Gpr,
-                RegisterBank::Xmm,
-                GPR_RETURN_0,
-                XMM_RETURN_0,
-            ),
-            (
-                RegisterBank::Xmm,
-                RegisterBank::Gpr,
-                XMM_RETURN_0,
-                GPR_RETURN_0,
-            ),
-        ];
-
-        for (first_bank, second_bank, expected_first, expected_second) in cases {
-            let mut return_buffer = [MaybeUninit::new(RETURN_SENTINEL); 16];
-
-            // SAFETY:
-            // - The buffer is large enough and disjoint from the frame.
-            // - Selected registers contain initialized bytes.
-            unsafe {
-                write_register_return(
-                    &call_frame,
-                    ReturnStrategy::TwoRegisters {
-                        first_bank,
-                        second_bank,
-                        second_byte_length: 6,
-                    },
-                    Ret::new(&mut return_buffer),
-                );
-            }
-
-            let actual = initialized_bytes::<16>(&return_buffer);
-            assert_eq!(&actual[..8], &expected_first);
-            assert_eq!(&actual[8..14], &expected_second[..6]);
-            assert_eq!(&actual[14..], &[RETURN_SENTINEL; 2]);
-        }
-    }
-
-    #[test]
-    fn non_register_returns_do_not_write_return_storage() {
-        let call_frame = synthetic_return_frame();
-
-        let mut return_buffer = [MaybeUninit::new(RETURN_SENTINEL); 16];
-
-        // SAFETY: A hidden-pointer strategy does not access return storage or any register slot.
-        unsafe {
-            write_register_return(
-                &call_frame,
-                ReturnStrategy::HiddenPointer {
-                    size: 0,
-                    align_log2: 0,
-                },
-                Ret::new(&mut return_buffer),
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep four entry shapes beside their shared payload assertions."
+    )]
+    fn variadic_signed_and_unsigned_128_bit_values_obey_atomic_spills_and_alignment() {
+        #[unsafe(naked)]
+        unsafe extern "sysv64" fn available(_output: *mut [u64; 9], _wide: u128, _trailing: u64) {
+            core::arch::naked_asm!(
+                "mov rax, rsi",
+                "mov [rdi + 0], rax",
+                "mov rax, rdx",
+                "mov [rdi + 8], rax",
+                "mov rax, rcx",
+                "mov [rdi + 16], rax",
+                "ret"
             );
         }
 
-        assert_eq!(
-            initialized_bytes::<16>(&return_buffer),
-            [RETURN_SENTINEL; 16]
-        );
+        #[unsafe(naked)]
+        unsafe extern "sysv64" fn one_gpr_left(
+            _output: *mut [u64; 9],
+            _i0: u64,
+            _i1: u64,
+            _i2: u64,
+            _i3: u64,
+            _wide: u128,
+            _trailing: u64,
+        ) {
+            core::arch::naked_asm!(
+                "mov [rdi + 0], rsi",
+                "mov [rdi + 8], rdx",
+                "mov [rdi + 16], rcx",
+                "mov [rdi + 24], r8",
+                "mov rax, [rsp + 8]",
+                "mov [rdi + 32], rax",
+                "mov rax, [rsp + 16]",
+                "mov [rdi + 40], rax",
+                "mov rax, r9",
+                "mov [rdi + 48], rax",
+                "ret"
+            );
+        }
+
+        #[unsafe(naked)]
+        unsafe extern "sysv64" fn exhausted(
+            _output: *mut [u64; 9],
+            _i0: u64,
+            _i1: u64,
+            _i2: u64,
+            _i3: u64,
+            _i4: u64,
+            _wide: u128,
+            _trailing: u64,
+        ) {
+            core::arch::naked_asm!(
+                "mov [rdi + 0], rsi",
+                "mov [rdi + 8], rdx",
+                "mov [rdi + 16], rcx",
+                "mov [rdi + 24], r8",
+                "mov [rdi + 32], r9",
+                "mov rax, [rsp + 8]",
+                "mov [rdi + 40], rax",
+                "mov rax, [rsp + 16]",
+                "mov [rdi + 48], rax",
+                "mov rax, [rsp + 24]",
+                "mov [rdi + 56], rax",
+                "ret"
+            );
+        }
+
+        #[unsafe(naked)]
+        unsafe extern "sysv64" fn after_spill(
+            _output: *mut [u64; 9],
+            _i0: u64,
+            _i1: u64,
+            _i2: u64,
+            _i3: u64,
+            _i4: u64,
+            _marker: u64,
+            _wide: u128,
+            _trailing: u64,
+        ) {
+            core::arch::naked_asm!(
+                "mov [rdi + 0], rsi",
+                "mov [rdi + 8], rdx",
+                "mov [rdi + 16], rcx",
+                "mov [rdi + 24], r8",
+                "mov [rdi + 32], r9",
+                "mov rax, [rsp + 8]",
+                "mov [rdi + 40], rax",
+                "mov rax, [rsp + 24]",
+                "mov [rdi + 48], rax",
+                "mov rax, [rsp + 32]",
+                "mov [rdi + 56], rax",
+                "mov rax, [rsp + 40]",
+                "mov [rdi + 64], rax",
+                "ret"
+            );
+        }
+
+        let integers = [0x1122u64, 0x3344, 0x5566, 0x7788, 0x99aa];
+        let wide = 0xfedc_ba98_7654_3210_0123_4567_89ab_cdefu128;
+        let signed = wide.cast_signed();
+        let marker = 0xabcd_ef01_2345_6789u64;
+        let trailing = 0x1357_9bdf_2468_ace0u64;
+        for (target, count, prior_spill) in [
+            (fn_ptrize!(available), 0, false),
+            (fn_ptrize!(one_gpr_left), 4, false),
+            (fn_ptrize!(exhausted), 5, false),
+            (fn_ptrize!(after_spill), 5, true),
+        ] {
+            for signed_type in [false, true] {
+                let mut fixed = vec![Type::Pointer];
+                fixed.extend(vec![Type::U64; count]);
+                let mut tail = Vec::new();
+                if prior_spill {
+                    tail.push(VariadicType::U64);
+                }
+                tail.extend([
+                    if signed_type {
+                        VariadicType::I128
+                    } else {
+                        VariadicType::U128
+                    },
+                    VariadicType::U64,
+                ]);
+                let function =
+                    Function::variadic_with_abi(target, &fixed, &tail, None, VariadicAbi::SysV);
+                let mut output = [0; 9];
+                let pointer = &raw mut output;
+                let mut args = vec![Arg::new(&pointer)];
+                args.extend(integers[..count].iter().map(Arg::new));
+                if prior_spill {
+                    args.push(Arg::new(&marker));
+                }
+                args.push(if signed_type {
+                    Arg::new(&signed)
+                } else {
+                    Arg::new(&wide)
+                });
+                args.push(Arg::new(&trailing));
+                // SAFETY: Each target matches the number of fixed GPR slots and stack payloads.
+                // Signed and unsigned storage share the 16-byte layout; the naked entry observes
+                // their two's-complement bits. With a prior spill, rsp+16 is padding and the wide
+                // value begins at rsp+24. Output storage is separate and live.
+                unsafe {
+                    function.call(&args, None);
+                }
+                let mut expected = integers[..count].to_vec();
+                if prior_spill {
+                    expected.push(marker);
+                }
+                expected.extend([0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210, trailing]);
+                assert_eq!(&output[..expected.len()], expected);
+            }
+        }
     }
 }

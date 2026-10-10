@@ -362,6 +362,53 @@ macro_rules! register_pressure_test {
     };
 }
 
+macro_rules! byte_pressure_cases {
+    (abi: $abi:path, extern_abi: $extern_abi:literal, gpr_args: $gpr_args:tt,
+        $($module:ident: $ty:ty = $value:path;)+
+    ) => {
+        $(mod $module {
+            use super::*;
+            register_passing_test! {
+                abi: $abi, extern_abi: $extern_abi,
+                fn available(; value: $ty = $value, trailing: u64 = 0xdead_beef_1234_5678)
+            }
+            register_pressure_test! {
+                abi: $abi, extern_abi: $extern_abi,
+                gpr_args: $gpr_args, float_args: [], free_gpr: 1, free_float: 0,
+                fn one_gpr_remaining(value: $ty = $value, trailing: u64 = 0xdead_beef_1234_5678)
+            }
+            register_pressure_test! {
+                abi: $abi, extern_abi: $extern_abi,
+                gpr_args: $gpr_args, float_args: [], free_gpr: 0, free_float: 0,
+                fn gpr_exhausted(value: $ty = $value, trailing: u64 = 0xdead_beef_1234_5678)
+            }
+        })+
+    };
+}
+
+macro_rules! mixed_pressure_cases {
+    (abi: $abi:path, extern_abi: $extern_abi:literal,
+        gpr_args: $gpr_args:tt, float_args: $float_args:tt,
+        $($module:ident: $ty:ty = $value:path;)+
+    ) => {
+        $(mod $module {
+            use super::*;
+            register_pressure_test! {
+                abi: $abi, extern_abi: $extern_abi,
+                gpr_args: $gpr_args, float_args: $float_args, free_gpr: 0, free_float: 2,
+                fn gpr_exhausted(value: $ty = $value, integer: u64 = 0x1357_9bdf_2468_ace0, float: f64 = -93.75)
+            }
+            register_pressure_test! {
+                abi: $abi, extern_abi: $extern_abi,
+                gpr_args: $gpr_args, float_args: $float_args, free_gpr: 2, free_float: 0,
+                fn float_exhausted(value: $ty = $value, integer: u64 = 0x1357_9bdf_2468_ace0, float: f64 = -93.75)
+            }
+        })+
+    };
+}
+
+pub(crate) use byte_pressure_cases;
+pub(crate) use mixed_pressure_cases;
 macro_rules! register_passing_tests_for_abi {
     (
         abi: $abi:path,
@@ -389,25 +436,75 @@ macro_rules! register_passing_tests_for_abi {
         mod register_passing {
             use crate::function::tests::helpers::call_ffi_fn;
             use crate::function::tests::register_passing::{
-                hidden_return_pointer_test, register_passing_test, register_pressure_test,
-                trim_register_args,
+                byte_pressure_cases, hidden_return_pointer_test, mixed_pressure_cases,
+                register_passing_test, register_pressure_test, trim_register_args,
             };
             use crate::test_utils::{F32_ARG, I16_ARG, U8_ARG, U128_ARG, USIZE_ARG};
             use crate::test_utils::structs::{
-                F64x2, F64X2_ARG, U32F32, U32x2, U32X2_ARG, U32_F32_ARG, U64F64,
-                U64x3, U64x4, U64X3_ARG, U64X4_ARG, U64_F64_ARG,
+                Bytes, BYTES_4_ARG, BYTES_5_ARG, BYTES_6_ARG, BYTES_8_ARG, BYTES_9_ARG,
+                BYTES_10_ARG, BYTES_11_ARG, BYTES_12_ARG, BYTES_13_ARG, BYTES_14_ARG,
+                BYTES_16_ARG, BYTES_17_ARG, F64UnionF64U64, F64UnionU64F64,
+                F64_UNION_F64_U64_ARG, F64_UNION_U64_F64_ARG, F64x2, F64X2_ARG,
+                NestedF32F32U32, NestedF32U32F32, NESTED_F32_F32_U32_ARG,
+                NESTED_F32_U32_F32_ARG, U8, U8_ARG as STRUCT_U8_ARG, U8x2, U8X2_ARG,
+                U8x3, U8X3_ARG, U8x7, U8X7_ARG, U8x15, U8X15_ARG, U32F32, U32x2,
+                U32X2_ARG, U32_F32_ARG, U64F64, U64x3, U64x4, U64X3_ARG, U64X4_ARG,
+                U64_F64_ARG,
             };
             use crate::test_utils::unions::{
+                UnionF32F64, UnionF32U32, UnionF32x3U8F64, UnionF64U64, UnionF64U64F64x2,
                 UnionI64U64, UnionNestedF64x2, UnionNestedU8x3F32x2,
-                UnionNestedU16x3F64x2, UnionU128, UNION_I64_U64_ARG,
+                UnionNestedU16x3F64x2, UnionU8F64F32x3, UnionU8F64x2, UnionU128,
+                UNION_F32_F64_ARG, UNION_F32_U32_ARG, UNION_F32X3_U8_F64_ARG,
+                UNION_F64_U64_ARG, UNION_F64_U64_F64X2_ARG, UNION_I64_U64_ARG,
                 UNION_NESTED_F64X2_ARG, UNION_NESTED_U8X3_F32X2_ARG,
-                UNION_NESTED_U16X3_F64X2_ARG, UNION_U128_ARG,
+                UNION_NESTED_U16X3_F64X2_ARG, UNION_U8_F64_F32X3_ARG,
+                UNION_U8_F64X2_ARG, UNION_U128_ARG,
             };
 
             register_passing_test! {
                 abi: $abi,
                 extern_abi: $extern_abi,
                 fn all_gpr_registers($($gpr_reg: usize = USIZE_ARG),*)
+            }
+
+            byte_pressure_cases! {
+                abi: $abi, extern_abi: $extern_abi,
+                gpr_args: [$(($gpr_reg: usize = USIZE_ARG)),*],
+                bytes_1: U8 = STRUCT_U8_ARG;
+                bytes_2: U8x2 = U8X2_ARG;
+                bytes_3: U8x3 = U8X3_ARG;
+                bytes_4: Bytes<4> = BYTES_4_ARG;
+                bytes_5: Bytes<5> = BYTES_5_ARG;
+                bytes_6: Bytes<6> = BYTES_6_ARG;
+                bytes_7: U8x7 = U8X7_ARG;
+                bytes_8: Bytes<8> = BYTES_8_ARG;
+                bytes_9: Bytes<9> = BYTES_9_ARG;
+                bytes_10: Bytes<10> = BYTES_10_ARG;
+                bytes_11: Bytes<11> = BYTES_11_ARG;
+                bytes_12: Bytes<12> = BYTES_12_ARG;
+                bytes_13: Bytes<13> = BYTES_13_ARG;
+                bytes_14: Bytes<14> = BYTES_14_ARG;
+                bytes_15: U8x15 = U8X15_ARG;
+                bytes_16: Bytes<16> = BYTES_16_ARG;
+                bytes_17: Bytes<17> = BYTES_17_ARG;
+            }
+
+            mixed_pressure_cases! {
+                abi: $abi, extern_abi: $extern_abi,
+                gpr_args: [$(($gpr_reg: usize = USIZE_ARG)),*],
+                float_args: [$(($float_reg: f64 = 21.5)),*],
+                pressure_nested_f32_u32_f32: NestedF32U32F32 = NESTED_F32_U32_F32_ARG;
+                pressure_nested_f32_f32_u32: NestedF32F32U32 = NESTED_F32_F32_U32_ARG;
+                pressure_f64_union_f64_u64: F64UnionF64U64 = F64_UNION_F64_U64_ARG;
+                pressure_f64_union_u64_f64: F64UnionU64F64 = F64_UNION_U64_F64_ARG;
+                pressure_union_f32_f64: UnionF32F64 = UNION_F32_F64_ARG;
+                pressure_union_f32_u32: UnionF32U32 = UNION_F32_U32_ARG;
+                pressure_union_f64_u64_f64x2: UnionF64U64F64x2 = UNION_F64_U64_F64X2_ARG;
+                pressure_union_f32x3_u8_f64: UnionF32x3U8F64 = UNION_F32X3_U8_F64_ARG;
+                pressure_union_u8_f64_f32x3: UnionU8F64F32x3 = UNION_U8_F64_F32X3_ARG;
+                pressure_union_f64_u64: UnionF64U64 = UNION_F64_U64_ARG;
+                pressure_union_u8_f64x2: UnionU8F64x2 = UNION_U8_F64X2_ARG;
             }
 
             register_passing_test! {

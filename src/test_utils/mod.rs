@@ -63,3 +63,44 @@ pub static SNPRINTF_EXPECTED_RETURN_VALUE: i32 = 86;
 unsafe extern "C" {
     pub unsafe fn snprintf(s: *mut c_char, n: usize, format: *const c_char, ...) -> i32;
 }
+
+/// Live return storage with sentinels immediately adjacent to the value.
+#[repr(C)]
+pub(crate) struct GuardedReturn<T> {
+    before: core::cell::UnsafeCell<[u8; 16]>,
+    value: core::mem::MaybeUninit<T>,
+    after: core::cell::UnsafeCell<[u8; 16]>,
+}
+
+impl<T> GuardedReturn<T> {
+    pub(crate) fn new() -> Self {
+        assert_eq!(core::mem::offset_of!(Self, value), 16);
+        assert_eq!(core::mem::offset_of!(Self, after), 16 + size_of::<T>());
+        Self {
+            before: core::cell::UnsafeCell::new([0xa5; 16]),
+            value: core::mem::MaybeUninit::uninit(),
+            after: core::cell::UnsafeCell::new([0x5a; 16]),
+        }
+    }
+
+    pub(crate) fn ret(&mut self) -> crate::function::Ret<'_> {
+        crate::function::Ret::new(&mut self.value)
+    }
+
+    /// # Safety
+    /// A successful call must have initialized the value.
+    pub(crate) unsafe fn get(self) -> T {
+        assert_eq!(
+            self.before.into_inner(),
+            [0xa5; 16],
+            "`Function::call` wrote outside of bounds."
+        );
+        assert_eq!(
+            self.after.into_inner(),
+            [0x5a; 16],
+            "`Function::call` wrote outside of bounds."
+        );
+        // SAFETY: The caller guarantees that the return value was initialized.
+        unsafe { self.value.assume_init() }
+    }
+}

@@ -480,13 +480,326 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::catch_unwind;
+
     use super::*;
     use crate::function::Function;
-    use crate::test_utils::structs::U64x3;
+    use crate::test_utils::GuardedReturn;
+    use crate::test_utils::structs::{Bytes, F32, U64X2_ARG, U64x2, U64x3};
+    use crate::test_utils::unions::{UNION_F32_U32_ARG, UnionF32U32};
     use crate::types::{FfiType, Type, VariadicType};
     use crate::{VariadicAbi, fn_ptrize};
 
     extern "C" fn unused_target() {}
+
+    // Synthetic frames exercise reservation arithmetic only. They are never invoked, and no
+    // synthetic storage is allocated or dereferenced.
+    #[test]
+    fn discarded_hidden_return_reservation_checks_alignment_and_size_overflow() {
+        let frame = |stack_size, size, align_log2| {
+            let plan = MarshalPlan {
+                argument_moves: Box::new([]),
+                stack_allocation_size: stack_size,
+                return_strategy: ReturnStrategy::HiddenPointer { size, align_log2 },
+            };
+            CallFrame::new(&plan, fn_ptrize!(unused_target), &[], None)
+        };
+        assert!(catch_unwind(|| frame(usize::MAX - 14, 1, 4)).is_err());
+        assert!(catch_unwind(|| frame(usize::MAX - 15, 16, 4)).is_err());
+        for (stack, size, align_log2, expected_offset, expected_len) in [
+            (32, 24, 3, 32, 56),
+            (usize::MAX - 16, 15, 4, usize::MAX - 15, usize::MAX),
+            (32, usize::MAX - 32, 0, 32, usize::MAX),
+        ] {
+            let result = frame(stack, size, align_log2);
+            assert!(result.return_pointer_is_offset);
+            assert_eq!(result.return_pointer, expected_offset);
+            assert_eq!(result.stack_allocation_len, expected_len);
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep shifted entry probes beside their concrete signatures and live buffers."
+    )]
+    fn variadic_aggregate_integer_slots_and_indirect_payloads_survive_hidden_shifts() {
+        #[unsafe(naked)]
+        unsafe extern "win64" fn capture(
+            _float: F32,
+            _union: UnionF32U32,
+            _odd: Bytes<3>,
+            _wide: u128,
+            _pair: U64x2,
+            _output: *mut [u64; 9],
+        ) -> u128 {
+            core::arch::naked_asm!(
+                // Four slots: ecx, edx, r8 and r9. Stack pointer to pair at rsp+40,
+                // output at rsp+48, including the return address and 32-byte shadow space.
+                "mov r10, [rsp + 48]",
+                "mov eax, ecx",
+                "mov [r10], rax",
+                "mov eax, edx",
+                "mov [r10 + 8], rax",
+                "movzx eax, byte ptr [r8]",
+                "mov [r10 + 16], rax",
+                "movzx eax, byte ptr [r8 + 1]",
+                "mov [r10 + 24], rax",
+                "movzx eax, byte ptr [r8 + 2]",
+                "mov [r10 + 32], rax",
+                "mov rax, [r9]",
+                "mov [r10 + 40], rax",
+                "mov rax, [r9 + 8]",
+                "mov [r10 + 48], rax",
+                "mov r11, [rsp + 40]",
+                "mov rax, [r11]",
+                "mov [r10 + 56], rax",
+                "mov rax, [r11 + 8]",
+                "mov [r10 + 64], rax",
+                "movdqu xmm0, [r9]",
+                "ret",
+            );
+        }
+        #[unsafe(naked)]
+        unsafe extern "win64" fn capture_hidden(
+            _float: F32,
+            _union: UnionF32U32,
+            _odd: Bytes<3>,
+            _wide: u128,
+            _pair: U64x2,
+            _output: *mut [u64; 9],
+        ) -> U64x3 {
+            core::arch::naked_asm!(
+                // rcx is hidden return, edx/r8d are small aggregates, r9 is odd copy.
+                // Wide/pair/output now occupy rsp+40/48/56 after shadow space.
+                "mov r10, [rsp + 56]",
+                "mov eax, edx",
+                "mov [r10], rax",
+                "mov eax, r8d",
+                "mov [r10 + 8], rax",
+                "movzx eax, byte ptr [r9]",
+                "mov [r10 + 16], rax",
+                "movzx eax, byte ptr [r9 + 1]",
+                "mov [r10 + 24], rax",
+                "movzx eax, byte ptr [r9 + 2]",
+                "mov [r10 + 32], rax",
+                "mov r11, [rsp + 40]",
+                "mov rax, [r11]",
+                "mov [r10 + 40], rax",
+                "mov [rcx], rax",
+                "mov rax, [r11 + 8]",
+                "mov [r10 + 48], rax",
+                "mov [rcx + 8], rax",
+                "mov r11, [rsp + 48]",
+                "mov rax, [r11]",
+                "mov [r10 + 56], rax",
+                "mov [rcx + 16], rax",
+                "mov rax, [r11 + 8]",
+                "mov [r10 + 64], rax",
+                "mov rax, rcx",
+                "ret",
+            );
+        }
+        let float = F32 {
+            a: f32::from_bits(0xffc1_2345),
+        };
+        let odd = Bytes::<3>::VALUE;
+        let wide = 0xfedc_ba98_7654_3210_0123_4567_89ab_cdefu128;
+        // SAFETY: The fixture initializes the integer alternative.
+        let integer = unsafe { UNION_F32_U32_ARG.integer };
+        let expected = [
+            u64::from(float.a.to_bits()),
+            u64::from(integer),
+            u64::from(odd.bytes[0]),
+            u64::from(odd.bytes[1]),
+            u64::from(odd.bytes[2]),
+            0x0123_4567_89ab_cdef,
+            0xfedc_ba98_7654_3210,
+            U64X2_ARG.a,
+            U64X2_ARG.b,
+        ];
+        for hidden in [false, true] {
+            let return_type = if hidden {
+                U64x3::ffi_type()
+            } else {
+                Type::U128
+            };
+            let function = Function::variadic_with_abi(
+                if hidden {
+                    fn_ptrize!(capture_hidden)
+                } else {
+                    fn_ptrize!(capture)
+                },
+                &[],
+                &[
+                    F32::ffi_type(),
+                    UnionF32U32::ffi_type(),
+                    Bytes::<3>::ffi_type(),
+                    Type::U128,
+                    U64x2::ffi_type(),
+                    Type::Pointer,
+                ]
+                .into_iter()
+                .map(|ty| VariadicType::try_from(ty).unwrap())
+                .collect::<Vec<_>>(),
+                Some(&return_type),
+                VariadicAbi::Win64,
+            );
+            let mut output = [0; 9];
+            let pointer = &raw mut output;
+            let args = [
+                Arg::new(&float),
+                Arg::new(&UNION_F32_U32_ARG),
+                Arg::new(&odd),
+                Arg::new(&wide),
+                Arg::new(&U64X2_ARG),
+                Arg::new(&pointer),
+            ];
+            if hidden {
+                let mut result = GuardedReturn::<U64x3>::new();
+                // SAFETY: The explicit signature matches capture_hidden, including shifted
+                // indirect pointers. Output and guarded return storage are separate live buffers.
+                unsafe {
+                    function.call(&args, Some(result.ret()));
+                }
+                assert_eq!(output, expected);
+                // SAFETY: capture_hidden initialized all three fields.
+                let result = unsafe { result.get() };
+                assert_eq!(
+                    result,
+                    U64x3 {
+                        a: 0x0123_4567_89ab_cdef,
+                        b: 0xfedc_ba98_7654_3210,
+                        c: U64X2_ARG.a
+                    }
+                );
+                output.fill(0);
+                // SAFETY: The same signature and arguments remain live; Function reserves the
+                // discarded hidden result storage that capture_hidden writes.
+                unsafe {
+                    function.call(&args, None);
+                }
+                assert_eq!(output, expected);
+            } else {
+                let mut result = GuardedReturn::<u128>::new();
+                // SAFETY: The explicit signature matches capture, which reads live copies and
+                // returns all 16 payload bytes in xmm0.
+                unsafe {
+                    function.call(&args, Some(result.ret()));
+                }
+                assert_eq!(output, expected);
+                // SAFETY: capture initialized the complete u128 result.
+                assert_eq!(unsafe { result.get() }, wide);
+            }
+        }
+    }
+
+    #[test]
+    fn variadic_indirect_aggregates_and_128_bit_tails_after_slot_exhaustion() {
+        #[unsafe(naked)]
+        unsafe extern "win64" fn capture(
+            _output: *mut [u64; 13],
+            _a: u64,
+            _b: u64,
+            _c: u64,
+            _odd: Bytes<3>,
+            _signed: i128,
+            _unsigned: u128,
+            _pair: U64x2,
+            _tail: u64,
+        ) -> u128 {
+            core::arch::naked_asm!(
+                "mov [rcx], rdx",
+                "mov [rcx + 8], r8",
+                "mov [rcx + 16], r9",
+                "mov r10, [rsp + 40]",
+                "movzx eax, byte ptr [r10]",
+                "mov [rcx + 24], rax",
+                "movzx eax, byte ptr [r10 + 1]",
+                "mov [rcx + 32], rax",
+                "movzx eax, byte ptr [r10 + 2]",
+                "mov [rcx + 40], rax",
+                "mov r10, [rsp + 48]",
+                "mov rax, [r10]",
+                "mov [rcx + 48], rax",
+                "mov rax, [r10 + 8]",
+                "mov [rcx + 56], rax",
+                "mov r10, [rsp + 56]",
+                "mov rax, [r10]",
+                "mov [rcx + 64], rax",
+                "mov rax, [r10 + 8]",
+                "mov [rcx + 72], rax",
+                "movdqu xmm0, [r10]",
+                "mov r10, [rsp + 64]",
+                "mov rax, [r10]",
+                "mov [rcx + 80], rax",
+                "mov rax, [r10 + 8]",
+                "mov [rcx + 88], rax",
+                "mov rax, [rsp + 72]",
+                "mov [rcx + 96], rax",
+                "ret",
+            );
+        }
+        let odd = Bytes::<3>::VALUE;
+        let signed = -0x1234_5678_9abc_def0_1122_3344_5566_7788i128;
+        let unsigned = 0xfedc_ba98_7654_3210_0123_4567_89ab_cdefu128;
+        let tail = 0x1357_9bdf_2468_ace0u64;
+        let function = Function::variadic_with_abi(
+            fn_ptrize!(capture),
+            &[Type::Pointer, Type::U64, Type::U64, Type::U64],
+            &[
+                VariadicType::try_from(Bytes::<3>::ffi_type()).unwrap(),
+                VariadicType::I128,
+                VariadicType::U128,
+                VariadicType::try_from(U64x2::ffi_type()).unwrap(),
+                VariadicType::U64,
+            ],
+            Some(&Type::U128),
+            VariadicAbi::Win64,
+        );
+        let mut output = [0; 13];
+        let pointer = &raw mut output;
+        let mut result = GuardedReturn::<u128>::new();
+        // SAFETY: Output plus three markers occupy the four fixed slots. Each variadic indirect
+        // pointer is read after the return address and shadow space, then exactly its initialized
+        // payload width is inspected. The final scalar and 16-byte return match capture.
+        unsafe {
+            function.call(
+                &[
+                    Arg::new(&pointer),
+                    Arg::new(&11u64),
+                    Arg::new(&22u64),
+                    Arg::new(&33u64),
+                    Arg::new(&odd),
+                    Arg::new(&signed),
+                    Arg::new(&unsigned),
+                    Arg::new(&U64X2_ARG),
+                    Arg::new(&tail),
+                ],
+                Some(result.ret()),
+            );
+        }
+        assert_eq!(
+            output,
+            [
+                11,
+                22,
+                33,
+                u64::from(odd.bytes[0]),
+                u64::from(odd.bytes[1]),
+                u64::from(odd.bytes[2]),
+                0xeedd_ccbb_aa99_8878,
+                0xedcb_a987_6543_210f,
+                0x0123_4567_89ab_cdef,
+                0xfedc_ba98_7654_3210,
+                U64X2_ARG.a,
+                U64X2_ARG.b,
+                tail
+            ]
+        );
+        // SAFETY: capture returned every byte of unsigned in xmm0.
+        assert_eq!(unsafe { result.get() }, unsigned);
+    }
 
     #[test]
     fn variadic_float_bits_reach_registers_and_stack_with_hidden_returns() {
@@ -678,120 +991,5 @@ mod tests {
                 second.to_bits()
             ]
         );
-    }
-
-    fn initialized_bytes<const N: usize>(bytes: &[MaybeUninit<u8>]) -> [u8; N] {
-        assert_eq!(bytes.len(), N);
-
-        core::array::from_fn(|index| {
-            // SAFETY: These tests pass only initialized payload, register, or sentinel bytes.
-            unsafe { *bytes[index].assume_init_ref() }
-        })
-    }
-
-    const GPR_RETURN_0: [u8; 8] = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
-    const XMM_RETURN_LOW: [u8; 8] = [0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57];
-    const XMM_RETURN_HIGH: [u8; 8] = [0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67];
-    const SENTINEL: u8 = 0xa5;
-
-    fn synthetic_return_frame<'arg>() -> CallFrame<'arg> {
-        let mut call_frame = CallFrame {
-            argument_moves: ptr::null(),
-            argument_move_len: 0,
-            arguments: ptr::null(),
-            return_pointer: 0,
-            return_pointer_is_offset: false,
-            return_rax: Register::default(),
-            return_xmm0: <[Register; 2] as Default>::default(),
-            stack_allocation_len: 0,
-            fn_ptr: fn_ptrize!(unused_target),
-        };
-
-        call_frame.return_rax.update_from_bytes(&GPR_RETURN_0);
-        call_frame.return_xmm0[0].update_from_bytes(&XMM_RETURN_LOW);
-        call_frame.return_xmm0[1].update_from_bytes(&XMM_RETURN_HIGH);
-
-        call_frame
-    }
-
-    #[test]
-    fn scalar_register_returns_copy_only_the_declared_length() {
-        let call_frame = synthetic_return_frame();
-        let cases = [
-            (ReturnStrategy::Rax { byte_length: 1 }, 1, GPR_RETURN_0),
-            (ReturnStrategy::Rax { byte_length: 2 }, 2, GPR_RETURN_0),
-            (ReturnStrategy::Rax { byte_length: 4 }, 4, GPR_RETURN_0),
-            (ReturnStrategy::Rax { byte_length: 8 }, 8, GPR_RETURN_0),
-            (ReturnStrategy::Xmm0 { byte_length: 4 }, 4, XMM_RETURN_LOW),
-            (ReturnStrategy::Xmm0 { byte_length: 8 }, 8, XMM_RETURN_LOW),
-        ];
-
-        for (strategy, byte_length, expected_register) in cases {
-            let mut return_buffer = [MaybeUninit::new(SENTINEL); 24];
-
-            // SAFETY:
-            // * The selected register bytes are initialized.
-            // * The return slice is large enough and disjoint from the frame.
-            unsafe {
-                write_register_return(&call_frame, strategy, Ret::new(&mut return_buffer[8..16]));
-            }
-
-            let actual = initialized_bytes::<24>(&return_buffer);
-            assert_eq!(&actual[..8], &[SENTINEL; 8], "{strategy:?}");
-            assert_eq!(
-                &actual[8..8 + byte_length],
-                &expected_register[..byte_length],
-                "{strategy:?}"
-            );
-            assert_eq!(
-                &actual[8 + byte_length..],
-                &[SENTINEL; 24][8 + byte_length..],
-                "{strategy:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn full_xmm0_return_copies_both_saved_halves() {
-        let call_frame = synthetic_return_frame();
-        let mut return_buffer = [MaybeUninit::new(SENTINEL); 32];
-
-        // SAFETY:
-        // * Both eight-byte slots holding the saved xmm0 value are initialized.
-        // * The return slice holds 16 bytes and is disjoint from the frame.
-        unsafe {
-            write_register_return(
-                &call_frame,
-                ReturnStrategy::Xmm0 { byte_length: 16 },
-                Ret::new(&mut return_buffer[8..24]),
-            );
-        }
-
-        let actual = initialized_bytes::<32>(&return_buffer);
-        assert_eq!(&actual[..8], &[SENTINEL; 8]);
-        assert_eq!(&actual[8..16], &XMM_RETURN_LOW);
-        assert_eq!(&actual[16..24], &XMM_RETURN_HIGH);
-        assert_eq!(&actual[24..], &[SENTINEL; 8]);
-    }
-
-    #[test]
-    fn non_register_returns_do_not_write_return_storage() {
-        let call_frame = synthetic_return_frame();
-
-        let mut return_buffer = [MaybeUninit::new(SENTINEL); 24];
-
-        // SAFETY: A hidden-pointer strategy does not access return storage or any register slot.
-        unsafe {
-            write_register_return(
-                &call_frame,
-                ReturnStrategy::HiddenPointer {
-                    size: 0,
-                    align_log2: 0,
-                },
-                Ret::new(&mut return_buffer),
-            );
-        }
-
-        assert_eq!(initialized_bytes::<24>(&return_buffer), [SENTINEL; 24]);
     }
 }

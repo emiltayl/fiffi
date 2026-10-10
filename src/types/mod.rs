@@ -851,8 +851,9 @@ mod tests {
     use core::any::type_name;
     use core::ffi::c_void;
     use core::mem::offset_of;
+    use std::panic::catch_unwind;
 
-    use super::{FfiType, ScalarType, Type, TypeRef, VariadicType};
+    use super::{FfiType, FfiTypeLayout, ScalarType, Type, TypeRef, VariadicType};
     use crate::test_utils::structs::*;
     use crate::test_utils::unions::*;
 
@@ -889,6 +890,162 @@ mod tests {
         ($($type:ty),+ $(,)?) => {
             $(assert_ffi_layout::<$type>();)+
         };
+    }
+
+    #[test]
+    fn added_fixture_field_offsets_match_rust_offsets() {
+        assert_eq!(offset_of!(Bytes<4>, bytes), 0);
+        assert_field_offsets::<Bytes<4>>(&(0..4).collect::<Vec<_>>());
+        assert_eq!(offset_of!(Bytes<5>, bytes), 0);
+        assert_field_offsets::<Bytes<5>>(&(0..5).collect::<Vec<_>>());
+        assert_eq!(offset_of!(Bytes<6>, bytes), 0);
+        assert_field_offsets::<Bytes<6>>(&(0..6).collect::<Vec<_>>());
+        assert_eq!(offset_of!(Bytes<8>, bytes), 0);
+        assert_field_offsets::<Bytes<8>>(&(0..8).collect::<Vec<_>>());
+        assert_eq!(offset_of!(Bytes<9>, bytes), 0);
+        assert_field_offsets::<Bytes<9>>(&(0..9).collect::<Vec<_>>());
+        assert_eq!(offset_of!(Bytes<10>, bytes), 0);
+        assert_field_offsets::<Bytes<10>>(&(0..10).collect::<Vec<_>>());
+        assert_eq!(offset_of!(Bytes<11>, bytes), 0);
+        assert_field_offsets::<Bytes<11>>(&(0..11).collect::<Vec<_>>());
+        assert_eq!(offset_of!(Bytes<12>, bytes), 0);
+        assert_field_offsets::<Bytes<12>>(&(0..12).collect::<Vec<_>>());
+        assert_eq!(offset_of!(Bytes<13>, bytes), 0);
+        assert_field_offsets::<Bytes<13>>(&(0..13).collect::<Vec<_>>());
+        assert_eq!(offset_of!(Bytes<14>, bytes), 0);
+        assert_field_offsets::<Bytes<14>>(&(0..14).collect::<Vec<_>>());
+        assert_eq!(offset_of!(Bytes<16>, bytes), 0);
+        assert_field_offsets::<Bytes<16>>(&(0..16).collect::<Vec<_>>());
+        assert_eq!(offset_of!(Bytes<17>, bytes), 0);
+        assert_field_offsets::<Bytes<17>>(&(0..17).collect::<Vec<_>>());
+        assert_field_offsets::<U32F32>(&[offset_of!(U32F32, a), offset_of!(U32F32, b)]);
+        assert_field_offsets::<F32U32>(&[offset_of!(F32U32, a), offset_of!(F32U32, b)]);
+        assert_field_offsets::<NestedF32U32F32>(&[
+            offset_of!(NestedF32U32F32, head),
+            offset_of!(NestedF32U32F32, inner),
+        ]);
+        assert_field_offsets::<NestedF32F32U32>(&[
+            offset_of!(NestedF32F32U32, head),
+            offset_of!(NestedF32F32U32, inner),
+        ]);
+        assert_eq!(size_of::<NestedF32U32F32>(), 12);
+        assert_eq!(size_of::<NestedF32F32U32>(), 12);
+        assert_field_offsets::<U8x2>(&[offset_of!(U8x2, a), offset_of!(U8x2, b)]);
+        assert_field_offsets::<U8x7>(&[
+            offset_of!(U8x7, a),
+            offset_of!(U8x7, b),
+            offset_of!(U8x7, c),
+            offset_of!(U8x7, d),
+            offset_of!(U8x7, e),
+            offset_of!(U8x7, f),
+            offset_of!(U8x7, g),
+        ]);
+        assert_field_offsets::<U8x15>(&[
+            offset_of!(U8x15, a),
+            offset_of!(U8x15, b),
+            offset_of!(U8x15, c),
+            offset_of!(U8x15, d),
+            offset_of!(U8x15, e),
+            offset_of!(U8x15, f),
+            offset_of!(U8x15, g),
+            offset_of!(U8x15, h),
+            offset_of!(U8x15, i),
+            offset_of!(U8x15, j),
+            offset_of!(U8x15, k),
+            offset_of!(U8x15, l),
+            offset_of!(U8x15, m),
+            offset_of!(U8x15, n),
+            offset_of!(U8x15, o),
+        ]);
+        assert_field_offsets::<F64UnionF64U64>(&[
+            offset_of!(F64UnionF64U64, head),
+            offset_of!(F64UnionF64U64, tail),
+        ]);
+        assert_field_offsets::<F64UnionU64F64>(&[
+            offset_of!(F64UnionU64F64, head),
+            offset_of!(F64UnionU64F64, tail),
+        ]);
+    }
+
+    #[test]
+    fn layout_arithmetic_checks_alignment_end_and_padding_overflow() {
+        for align in [1usize, 8, 16] {
+            let last_aligned = usize::MAX - (align - 1);
+            let mut layout = FfiTypeLayout {
+                align: 1,
+                size: last_aligned - align,
+            };
+            assert_eq!(
+                layout.append_field(FfiTypeLayout { align, size: align }),
+                last_aligned - align
+            );
+            layout.pad_to_alignment();
+            assert_eq!(
+                layout,
+                FfiTypeLayout {
+                    align,
+                    size: last_aligned
+                }
+            );
+
+            assert!(
+                catch_unwind(|| {
+                    let mut layout = FfiTypeLayout {
+                        align,
+                        size: last_aligned,
+                    };
+                    layout.append_field(FfiTypeLayout { align, size: align });
+                })
+                .is_err()
+            );
+            if align > 1 {
+                let mut layout = FfiTypeLayout {
+                    align: 1,
+                    size: last_aligned - 1,
+                };
+                assert_eq!(
+                    layout.append_field(FfiTypeLayout { align, size: 0 }),
+                    last_aligned
+                );
+                assert_eq!(layout.size, last_aligned);
+                assert!(
+                    catch_unwind(|| {
+                        let mut layout = FfiTypeLayout {
+                            align: 1,
+                            size: last_aligned + 1,
+                        };
+                        layout.append_field(FfiTypeLayout { align, size: 1 });
+                    })
+                    .is_err()
+                );
+                assert!(
+                    catch_unwind(|| {
+                        let mut layout = FfiTypeLayout {
+                            align,
+                            size: last_aligned + 1,
+                        };
+                        layout.pad_to_alignment();
+                    })
+                    .is_err()
+                );
+                let mut layout = FfiTypeLayout {
+                    align,
+                    size: last_aligned - 1,
+                };
+                layout.pad_to_alignment();
+                assert_eq!(layout.size, last_aligned);
+            } else {
+                let mut layout = FfiTypeLayout {
+                    align,
+                    size: usize::MAX,
+                };
+                layout.pad_to_alignment();
+                assert_eq!(
+                    layout.append_field(FfiTypeLayout { align, size: 0 }),
+                    usize::MAX
+                );
+            }
+        }
     }
 
     #[test]
@@ -956,6 +1113,11 @@ mod tests {
             UnionNestedF64x2, UnionNestedU8U16U64, UnionNestedU64F64, UnionNestedF32x4U32x4,
             UnionNestedF64x2U64x2, UnionNestedF32x2U64, UnionNestedF64x4U64x4,
             UnionNestedU64x4F64x4,
+            Bytes<4>, Bytes<5>, Bytes<6>, Bytes<8>, Bytes<9>, Bytes<10>, Bytes<11>, Bytes<12>,
+            Bytes<13>, Bytes<14>, Bytes<16>, Bytes<17>, NestedF32U32F32, NestedF32F32U32,
+            F64UnionF64U64, F64UnionU64F64, UnionF32F64, UnionF32U32,
+            UnionF64U64F64x2, UnionF32x3U8F64, UnionU8F64F32x3, UnionF64U64, UnionU8F64x2,
+            UnionBytes17, UnionBytes17U128, F32U32, U8x2, U8x7, U8x15,
         );
     }
 

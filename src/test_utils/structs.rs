@@ -924,3 +924,111 @@ pub static USIZE_POINTER_ARG: UsizePointer = UsizePointer {
     size: 0x5000_0001,
     pointer: ptr::without_provenance::<c_void>(0x5000_0002),
 };
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct Bytes<const N: usize> {
+    pub bytes: [u8; N],
+}
+
+// SAFETY: A C byte array has the layout of N consecutive u8 fields with alignment one.
+// Tests instantiate only nonempty arrays.
+unsafe impl<const N: usize> FfiType for Bytes<N> {
+    fn ffi_type() -> Type {
+        Type::create_struct(vec![Type::U8; N]).unwrap()
+    }
+}
+
+impl<const N: usize> Bytes<N> {
+    pub const VALUE: Self = Self {
+        bytes: {
+            let mut bytes = [0; N];
+            let mut index = 0;
+            let mut byte = 0x31u8;
+            while index < N {
+                bytes[index] = byte;
+                byte = byte.wrapping_add(1);
+                index += 1;
+            }
+            bytes
+        },
+    };
+}
+pub const BYTES_4_ARG: Bytes<4> = Bytes::VALUE;
+pub const BYTES_5_ARG: Bytes<5> = Bytes::VALUE;
+pub const BYTES_6_ARG: Bytes<6> = Bytes::VALUE;
+pub const BYTES_8_ARG: Bytes<8> = Bytes::VALUE;
+pub const BYTES_9_ARG: Bytes<9> = Bytes::VALUE;
+pub const BYTES_10_ARG: Bytes<10> = Bytes::VALUE;
+pub const BYTES_11_ARG: Bytes<11> = Bytes::VALUE;
+pub const BYTES_12_ARG: Bytes<12> = Bytes::VALUE;
+pub const BYTES_13_ARG: Bytes<13> = Bytes::VALUE;
+pub const BYTES_14_ARG: Bytes<14> = Bytes::VALUE;
+pub const BYTES_16_ARG: Bytes<16> = Bytes::VALUE;
+pub const BYTES_17_ARG: Bytes<17> = Bytes::VALUE;
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[repr(C)]
+pub struct F32U32 {
+    pub a: f32,
+    pub b: u32,
+}
+impl_ffi_struct!(F32U32, Type::F32, Type::U32);
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[repr(C)]
+pub struct NestedF32U32F32 {
+    pub head: f32,
+    pub inner: U32F32,
+}
+impl_ffi_struct!(NestedF32U32F32, Type::F32, U32F32::ffi_type());
+pub const NESTED_F32_U32_F32_ARG: NestedF32U32F32 = NestedF32U32F32 {
+    head: 13.25,
+    inner: U32F32 {
+        a: 0xa1b2_c3d4,
+        b: -29.5,
+    },
+};
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[repr(C)]
+pub struct NestedF32F32U32 {
+    pub head: f32,
+    pub inner: F32U32,
+}
+impl_ffi_struct!(NestedF32F32U32, Type::F32, F32U32::ffi_type());
+pub const NESTED_F32_F32_U32_ARG: NestedF32F32U32 = NestedF32F32U32 {
+    head: -17.75,
+    inner: F32U32 {
+        a: 41.5,
+        b: 0xd4c3_b2a1,
+    },
+};
+
+#[derive(Copy, Clone, PartialEq)]
+#[repr(C)]
+pub struct F64UnionF64U64 {
+    pub head: f64,
+    pub tail: crate::test_utils::unions::UnionF64U64,
+}
+impl_ffi_struct!(
+    F64UnionF64U64,
+    Type::F64,
+    crate::test_utils::unions::UnionF64U64::ffi_type()
+);
+pub const F64_UNION_F64_U64_ARG: F64UnionF64U64 = F64UnionF64U64 {
+    head: -71.5,
+    tail: crate::test_utils::unions::UNION_F64_U64_ARG,
+};
+
+#[derive(Copy, Clone, PartialEq)]
+#[repr(C)]
+pub struct F64UnionU64F64 {
+    pub head: f64,
+    pub tail: UnionU64F64,
+}
+impl_ffi_struct!(F64UnionU64F64, Type::F64, UnionU64F64::ffi_type());
+pub const F64_UNION_U64_F64_ARG: F64UnionU64F64 = F64UnionU64F64 {
+    head: 89.75,
+    tail: crate::test_utils::unions::UNION_U64_F64_ARG,
+};

@@ -357,3 +357,133 @@ pub static UNION_NESTED_U64X4_F64X4_ARG: UnionNestedU64x4F64x4 = UnionNestedU64x
         d: 0x4000_0000_0000_0019,
     },
 };
+
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub union UnionF32F64 {
+    pub small: f32,
+    pub full: f64,
+}
+impl_ffi_union!(UnionF32F64, Type::F32, Type::F64);
+impl_union_partial_eq!(UnionF32F64, full);
+pub const UNION_F32_F64_ARG: UnionF32F64 = UnionF32F64 { full: -31.75 };
+
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub union UnionF32U32 {
+    pub float: f32,
+    pub integer: u32,
+}
+impl_ffi_union!(UnionF32U32, Type::F32, Type::U32);
+impl_union_partial_eq!(UnionF32U32, integer);
+pub const UNION_F32_U32_ARG: UnionF32U32 = UnionF32U32 {
+    integer: 0xd1e2_f3a4,
+};
+
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub union UnionF64U64F64x2 {
+    pub mixed: crate::test_utils::structs::F64U64,
+    pub floats: F64x2,
+}
+impl_ffi_union!(
+    UnionF64U64F64x2,
+    crate::test_utils::structs::F64U64::ffi_type(),
+    F64x2::ffi_type()
+);
+impl_union_partial_eq!(UnionF64U64F64x2, mixed);
+pub const UNION_F64_U64_F64X2_ARG: UnionF64U64F64x2 = UnionF64U64F64x2 {
+    mixed: crate::test_utils::structs::F64U64 {
+        a: -33.5,
+        b: 0xa1b2_c3d4_e5f6_7890,
+    },
+};
+
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub union UnionF32x3U8F64 {
+    pub floats: crate::test_utils::structs::F32x3,
+    pub mixed: crate::test_utils::structs::U8F64,
+}
+impl_ffi_union!(
+    UnionF32x3U8F64,
+    crate::test_utils::structs::F32x3::ffi_type(),
+    crate::test_utils::structs::U8F64::ffi_type()
+);
+impl_union_partial_eq!(UnionF32x3U8F64, mixed);
+pub const UNION_F32X3_U8_F64_ARG: UnionF32x3U8F64 = UnionF32x3U8F64 {
+    mixed: crate::test_utils::structs::U8F64 { a: 0xd3, b: -97.25 },
+};
+
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub union UnionU8F64F32x3 {
+    pub mixed: crate::test_utils::structs::U8F64,
+    pub floats: crate::test_utils::structs::F32x3,
+}
+impl_ffi_union!(
+    UnionU8F64F32x3,
+    crate::test_utils::structs::U8F64::ffi_type(),
+    crate::test_utils::structs::F32x3::ffi_type()
+);
+impl_union_partial_eq!(UnionU8F64F32x3, mixed);
+pub const UNION_U8_F64_F32X3_ARG: UnionU8F64F32x3 = UnionU8F64F32x3 {
+    mixed: crate::test_utils::structs::U8F64 { a: 0xb7, b: 53.75 },
+};
+
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub union UnionF64U64 {
+    pub float: f64,
+    pub integer: u64,
+}
+impl_ffi_union!(UnionF64U64, Type::F64, Type::U64);
+impl_union_partial_eq!(UnionF64U64, integer);
+pub const UNION_F64_U64_ARG: UnionF64U64 = UnionF64U64 {
+    integer: 0x9876_5432_10ab_cdef,
+};
+
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub union UnionU8F64x2 {
+    pub small: u8,
+    pub floats: F64x2,
+}
+impl_ffi_union!(UnionU8F64x2, Type::U8, F64x2::ffi_type());
+impl_union_partial_eq!(UnionU8F64x2, floats);
+pub const UNION_U8_F64X2_ARG: UnionU8F64x2 = UnionU8F64x2 {
+    floats: F64x2 {
+        a: 83.5,
+        b: -101.75,
+    },
+};
+
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub union UnionBytes17 {
+    pub bytes: crate::test_utils::structs::Bytes<17>,
+}
+impl_ffi_union!(
+    UnionBytes17,
+    crate::test_utils::structs::Bytes::<17>::ffi_type()
+);
+impl_union_partial_eq!(UnionBytes17, bytes);
+pub const UNION_BYTES_17_ARG: UnionBytes17 = UnionBytes17 {
+    bytes: crate::test_utils::structs::Bytes::VALUE,
+};
+
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub union UnionBytes17U128 {
+    pub bytes: crate::test_utils::structs::Bytes<17>,
+    pub wide: u128,
+}
+impl_ffi_union!(
+    UnionBytes17U128,
+    crate::test_utils::structs::Bytes::<17>::ffi_type(),
+    Type::U128
+);
+impl_union_partial_eq!(UnionBytes17U128, bytes);
+pub const UNION_BYTES_17_U128_ARG: UnionBytes17U128 = UnionBytes17U128 {
+    bytes: crate::test_utils::structs::Bytes::VALUE,
+};

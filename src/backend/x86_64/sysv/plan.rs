@@ -5,7 +5,19 @@ use alloc::{boxed::Box, vec::Vec};
 
 use super::classification::ValueClass;
 use crate::backend::CallSignature;
-use crate::types::TypeRef;
+use crate::types::{FfiTypeLayout, TypeRef};
+
+// Separate allocation arithmetic so boundary tests need neither huge type trees nor storage.
+fn reserve_stack_argument(allocation_size: &mut usize, layout: FfiTypeLayout) -> usize {
+    let offset = allocation_size
+        .checked_next_multiple_of(layout.align)
+        .expect("SysV stack allocation alignment overflow");
+    *allocation_size = offset
+        .strict_add(layout.size)
+        .checked_next_multiple_of(8)
+        .expect("SysV stack allocation rounding overflow");
+    offset
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MarshalPlan {
@@ -49,18 +61,13 @@ impl MarshalPlan {
             match allocation {
                 None => {
                     // Stack arguments appear in argument order, starting at a 16-byte boundary.
-                    stack_allocation_size = stack_allocation_size
-                        .checked_next_multiple_of(argument_layout.align)
-                        .expect("SysV stack allocation alignment overflow");
+                    let stack_offset =
+                        reserve_stack_argument(&mut stack_allocation_size, argument_layout);
                     argument_moves.push(ArgumentMove::argument_to_stack(
                         source,
-                        stack_allocation_size,
+                        stack_offset,
                         argument_layout.size,
                     ));
-                    stack_allocation_size = stack_allocation_size
-                        .strict_add(argument_layout.size)
-                        .checked_next_multiple_of(8)
-                        .expect("SysV stack allocation rounding overflow");
                 }
                 Some(RegisterAllocation::One(destination)) => {
                     argument_moves.push(destination.argument_move(
@@ -380,291 +387,46 @@ impl RegisterAllocator {
         AllocatedRegister { bank, index }
     }
 }
+
 #[cfg(test)]
 mod tests {
+    use std::panic::catch_unwind;
+
     use super::*;
-    use crate::types::{Type, VariadicType};
+    use crate::test_utils::structs::{F64x2, U64x3};
+    use crate::types::{FfiType, Type, VariadicType};
 
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    enum ExpectedLocation {
-        Gpr(usize),
-        Xmm(usize),
-        Stack(usize),
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    struct ExpectedMove {
-        source: usize,
-        source_offset: usize,
-        size: usize,
-        destination: ExpectedLocation,
-    }
-
-    impl ExpectedMove {
-        fn whole_argument(
-            argument_types: &[Type],
-            source: usize,
-            destination: ExpectedLocation,
-        ) -> Self {
-            Self {
-                source,
-                source_offset: 0,
-                size: argument_types[source].layout().size,
-                destination,
-            }
-        }
-
-        fn eightbyte(
-            source: usize,
-            source_offset: usize,
-            size: usize,
-            destination: ExpectedLocation,
-        ) -> Self {
-            Self {
-                source,
-                source_offset,
-                size,
-                destination,
-            }
-        }
-    }
-
-    fn assert_marshal_plan(
-        argument_types: &[Type],
-        return_type: Option<&Type>,
-        expected_moves: &[ExpectedMove],
-        expected_stack_allocation_size: usize,
-    ) {
-        assert_signature_plan(
-            CallSignature::new(argument_types, return_type),
-            expected_moves,
-            expected_stack_allocation_size,
+    // Private allocation arithmetic cannot be reached with bounded real signatures.
+    #[test]
+    fn stack_allocation_checks_alignment_addition_and_eightbyte_rounding() {
+        let reserve = |end, align, size| {
+            let mut allocation = end;
+            let offset = reserve_stack_argument(&mut allocation, FfiTypeLayout { align, size });
+            (offset, allocation)
+        };
+        assert!(catch_unwind(|| reserve(usize::MAX - 6, 8, 1)).is_err());
+        assert!(catch_unwind(|| reserve(usize::MAX - 15, 16, 16)).is_err());
+        assert!(catch_unwind(|| reserve(usize::MAX - 7, 8, 1)).is_err());
+        assert_eq!(reserve(1, 16, 9), (16, 32));
+        assert_eq!(
+            reserve(usize::MAX - 7, 8, 0),
+            (usize::MAX - 7, usize::MAX - 7)
         );
-    }
-
-    fn assert_signature_plan(
-        signature: CallSignature<'_>,
-        expected_moves: &[ExpectedMove],
-        expected_stack_allocation_size: usize,
-    ) -> MarshalPlan {
-        let plan = MarshalPlan::build(signature);
-
-        let mut actual_moves = plan
-            .argument_moves
-            .iter()
-            .map(|argument_move| {
-                // Decode the documented bits independently of constructors/production helpers.
-                let (destination, source_offset) = match argument_move.destination & 0b111 {
-                    0 => (
-                        ExpectedLocation::Gpr((argument_move.destination >> 3) & 0b111),
-                        ((argument_move.destination >> 6) & 1) * 8,
-                    ),
-                    1 => (
-                        ExpectedLocation::Xmm((argument_move.destination >> 3) & 0b111),
-                        ((argument_move.destination >> 6) & 1) * 8,
-                    ),
-                    2 => (
-                        ExpectedLocation::Stack(argument_move.destination & !0b111),
-                        0,
-                    ),
-                    _ => panic!("invalid move kind"),
-                };
-                ExpectedMove {
-                    source: argument_move.source,
-                    source_offset,
-                    size: argument_move.size,
-                    destination,
-                }
-            })
-            .collect::<Vec<_>>();
-
-        actual_moves
-            .sort_by_key(|argument_move| (argument_move.source, argument_move.source_offset));
-
-        let mut expected_moves = expected_moves.to_vec();
-        expected_moves
-            .sort_by_key(|argument_move| (argument_move.source, argument_move.source_offset));
-
-        assert_eq!(actual_moves, expected_moves);
-        assert_eq!(plan.stack_allocation_size, expected_stack_allocation_size);
-        plan
-    }
-
-    fn struct_type(fields: &[Type]) -> Type {
-        Type::create_struct_from_slice(fields).expect("Test struct must contain at least one field")
-    }
-
-    #[test]
-    fn byte_aggregates_preserve_exact_widths_offsets_and_atomic_spills() {
-        for size in 1..=16 {
-            let byte_aggregate = struct_type(&vec![Type::U8; size]);
-            let first_size = size.min(8);
-            let mut expected = vec![ExpectedMove::eightbyte(
-                0,
-                0,
-                first_size,
-                ExpectedLocation::Gpr(0),
-            )];
-            if size > 8 {
-                expected.push(ExpectedMove::eightbyte(
-                    0,
-                    8,
-                    size - 8,
-                    ExpectedLocation::Gpr(1),
-                ));
-            }
-            assert_marshal_plan(core::slice::from_ref(&byte_aggregate), None, &expected, 0);
-
-            // A failed two-register allocation leaves the last GPR for the following scalar.
-            let mut arguments = vec![Type::U64; 5];
-            arguments.push(byte_aggregate);
-            arguments.push(Type::U8);
-            let mut expected: Vec<_> = (0..5)
-                .map(|index| ExpectedMove::eightbyte(index, 0, 8, ExpectedLocation::Gpr(index)))
-                .collect();
-            if size <= 8 {
-                expected.push(ExpectedMove::eightbyte(
-                    5,
-                    0,
-                    size,
-                    ExpectedLocation::Gpr(5),
-                ));
-                expected.push(ExpectedMove::eightbyte(6, 0, 1, ExpectedLocation::Stack(0)));
-                assert_marshal_plan(&arguments, None, &expected, 8);
-            } else {
-                expected.push(ExpectedMove::eightbyte(
-                    5,
-                    0,
-                    size,
-                    ExpectedLocation::Stack(0),
-                ));
-                expected.push(ExpectedMove::eightbyte(6, 0, 1, ExpectedLocation::Gpr(5)));
-                assert_marshal_plan(&arguments, None, &expected, 16);
-            }
-        }
-    }
-
-    #[test]
-    fn register_move_encodings_cover_both_banks_and_all_payload_widths() {
-        for (kind, count) in [(ArgumentMoveKind::Gpr, 6), (ArgumentMoveKind::Xmm, 8)] {
-            for index in 0..count {
-                for source_offset in [0, 8] {
-                    for size in 1..=8 {
-                        let step =
-                            ArgumentMove::register_move(17, index, source_offset, size, kind);
-                        assert_eq!(step.source, 17);
-                        assert_eq!(step.size, size);
-                        assert_eq!(
-                            step.destination,
-                            kind as usize | (index << 3) | ((source_offset / 8) << 6)
-                        );
-                    }
-                }
-            }
-        }
-        for size in 0..=17 {
-            let step = ArgumentMove::argument_to_stack(17, 64, size);
-            assert_eq!(step.destination, 64 | 2);
-            assert_eq!(step.size, size);
-        }
-        assert_eq!(ArgumentMove::argument_to_stack(0, 0, 3).destination, 2);
-    }
-
-    #[test]
-    fn return_strategies_follow_return_classes_and_layout_lengths() {
-        let integer_sse = struct_type(&[Type::U32, Type::U32, Type::F32]);
-        let sse_integer = struct_type(&[Type::F32, Type::F32, Type::U32]);
-        let sse_sse = struct_type(&[Type::F32, Type::F32, Type::F32]);
-        let memory = struct_type(&[Type::U64, Type::U64, Type::U64]);
-
-        let memory_layout = memory.layout();
-
-        let cases = [
-            (None, ReturnStrategy::Void),
-            (
-                Some(Type::U8),
-                ReturnStrategy::SingleRegister {
-                    bank: RegisterBank::Gpr,
-                    byte_length: 1,
-                },
-            ),
-            (
-                Some(Type::Pointer),
-                ReturnStrategy::SingleRegister {
-                    bank: RegisterBank::Gpr,
-                    byte_length: 8,
-                },
-            ),
-            (
-                Some(Type::F32),
-                ReturnStrategy::SingleRegister {
-                    bank: RegisterBank::Xmm,
-                    byte_length: 4,
-                },
-            ),
-            (
-                Some(Type::F64),
-                ReturnStrategy::SingleRegister {
-                    bank: RegisterBank::Xmm,
-                    byte_length: 8,
-                },
-            ),
-            (
-                Some(Type::U128),
-                ReturnStrategy::TwoRegisters {
-                    first_bank: RegisterBank::Gpr,
-                    second_bank: RegisterBank::Gpr,
-                    second_byte_length: 8,
-                },
-            ),
-            (
-                Some(integer_sse),
-                ReturnStrategy::TwoRegisters {
-                    first_bank: RegisterBank::Gpr,
-                    second_bank: RegisterBank::Xmm,
-                    second_byte_length: 4,
-                },
-            ),
-            (
-                Some(sse_integer),
-                ReturnStrategy::TwoRegisters {
-                    first_bank: RegisterBank::Xmm,
-                    second_bank: RegisterBank::Gpr,
-                    second_byte_length: 4,
-                },
-            ),
-            (
-                Some(sse_sse),
-                ReturnStrategy::TwoRegisters {
-                    first_bank: RegisterBank::Xmm,
-                    second_bank: RegisterBank::Xmm,
-                    second_byte_length: 4,
-                },
-            ),
-            (
-                Some(memory),
-                ReturnStrategy::HiddenPointer {
-                    size: memory_layout.size,
-                    align_log2: u8::try_from(memory_layout.align.trailing_zeros())
-                        .expect("`usize::trailing_zeros` will always fit inside an `u8`."),
-                },
-            ),
-        ];
-
-        for (return_type, expected_strategy) in cases {
-            let plan = MarshalPlan::build(CallSignature::new(&[], return_type.as_ref()));
-            assert_eq!(plan.return_strategy, expected_strategy);
-        }
-    }
-
-    #[test]
-    fn empty_signature_requires_no_argument_storage() {
-        assert_marshal_plan(&[], None, &[], 0);
+        assert_eq!(
+            reserve(usize::MAX - 15, 16, 8),
+            (usize::MAX - 15, usize::MAX - 7)
+        );
+        assert_eq!(
+            reserve(usize::MAX - 8, 1, 1),
+            (usize::MAX - 8, usize::MAX - 7)
+        );
     }
 
     #[test]
     fn variadic_al_counts_only_allocated_argument_vector_registers() {
-        let hidden_return = struct_type(&[const { Type::U64 }; 3]);
+        // The ABI permits any upper bound from actual vector-register usage through eight.
+        // Exact counts deliberately test the current planner's stronger implementation contract.
+        let hidden_return = U64x3::ffi_type();
         for (fixed_count, variadic_count, return_type, expected_al) in [
             (0, 0, None, 0),
             (1, 0, None, 1),
@@ -682,499 +444,17 @@ mod tests {
                 "{fixed_count} fixed, {variadic_count} variadic, {return_type:?}"
             );
         }
-    }
-
-    #[test]
-    fn variadic_float_aggregate_counts_registers_and_preserves_partial_eightbytes() {
+        let fixed = vec![Type::F64; 7];
         let variadic = [
-            VariadicType::create_struct(vec![Type::F32; 3]).unwrap(),
+            VariadicType::try_from(F64x2::ffi_type()).unwrap(),
             VariadicType::F64,
         ];
-        let plan = assert_signature_plan(
-            CallSignature::variadic(&[], &variadic, None),
-            &[
-                ExpectedMove::eightbyte(0, 0, 8, ExpectedLocation::Xmm(0)),
-                ExpectedMove::eightbyte(0, 8, 4, ExpectedLocation::Xmm(1)),
-                ExpectedMove::eightbyte(1, 0, 8, ExpectedLocation::Xmm(2)),
-            ],
-            0,
-        );
-        assert_eq!(plan.al, 3);
-    }
-
-    #[test]
-    fn variadic_two_xmm_spill_leaves_the_last_register_available() {
-        let fixed = [const { Type::F64 }; 7];
-        let variadic = [
-            VariadicType::create_struct(vec![Type::F64; 2]).unwrap(),
-            VariadicType::F64,
-        ];
-        let mut expected: Vec<_> = (0..7)
-            .map(|index| ExpectedMove::whole_argument(&fixed, index, ExpectedLocation::Xmm(index)))
-            .collect();
-        expected.extend([
-            ExpectedMove::eightbyte(7, 0, 16, ExpectedLocation::Stack(0)),
-            ExpectedMove::eightbyte(8, 0, 8, ExpectedLocation::Xmm(7)),
-        ]);
-        let plan = assert_signature_plan(
-            CallSignature::variadic(&fixed, &variadic, None),
-            &expected,
-            16,
-        );
-        assert_eq!(plan.al, 8);
-    }
-
-    #[test]
-    fn variadic_mixed_spill_preserves_xmm_with_or_without_hidden_return() {
-        let hidden_return = struct_type(&[const { Type::U64 }; 3]);
-        let variadic = [
-            VariadicType::create_struct(vec![Type::U64, Type::F64]).unwrap(),
-            VariadicType::F64,
-        ];
-        for (fixed_count, first_gpr, return_type) in [(6, 0, None), (5, 1, Some(&hidden_return))] {
-            let fixed = vec![Type::U64; fixed_count];
-            let mut expected: Vec<_> = (0..fixed_count)
-                .map(|index| {
-                    ExpectedMove::whole_argument(
-                        &fixed,
-                        index,
-                        ExpectedLocation::Gpr(first_gpr + index),
-                    )
-                })
-                .collect();
-            expected.extend([
-                ExpectedMove::eightbyte(fixed_count, 0, 16, ExpectedLocation::Stack(0)),
-                ExpectedMove::eightbyte(fixed_count + 1, 0, 8, ExpectedLocation::Xmm(0)),
-            ]);
-            let plan = assert_signature_plan(
-                CallSignature::variadic(&fixed, &variadic, return_type),
-                &expected,
-                16,
+        for return_type in [None, Some(&Type::F64), Some(&hidden_return)] {
+            let plan = MarshalPlan::build(CallSignature::variadic(&fixed, &variadic, return_type));
+            assert_eq!(
+                plan.al, 8,
+                "spilled pair must leave the last vector register available"
             );
-            assert_eq!(plan.al, 1);
         }
-    }
-
-    #[test]
-    fn variadic_nested_fields_and_union_variants_preserve_eightbyte_classes() {
-        let float_fields = struct_type(&[const { Type::F32 }; 3]);
-        let integer_and_float = struct_type(&[Type::U8, Type::F64]);
-        for variants in [
-            vec![float_fields.clone(), integer_and_float.clone()],
-            vec![integer_and_float, float_fields],
-        ] {
-            let variadic = [
-                VariadicType::create_struct(vec![Type::F32, struct_type(&[Type::U32, Type::F32])])
-                    .unwrap(),
-                VariadicType::create_union(variants).unwrap(),
-            ];
-            let plan = assert_signature_plan(
-                CallSignature::variadic(&[], &variadic, None),
-                &[
-                    ExpectedMove::eightbyte(0, 0, 8, ExpectedLocation::Gpr(0)),
-                    ExpectedMove::eightbyte(0, 8, 4, ExpectedLocation::Xmm(0)),
-                    ExpectedMove::eightbyte(1, 0, 8, ExpectedLocation::Gpr(1)),
-                    ExpectedMove::eightbyte(1, 8, 8, ExpectedLocation::Xmm(1)),
-                ],
-                0,
-            );
-            assert_eq!(plan.al, 2);
-        }
-    }
-
-    #[test]
-    fn integer_arguments_fill_six_registers_before_using_the_stack() {
-        let argument_types = [
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-        ];
-        let expected_moves = [
-            ExpectedMove::whole_argument(&argument_types, 0, ExpectedLocation::Gpr(0)),
-            ExpectedMove::whole_argument(&argument_types, 1, ExpectedLocation::Gpr(1)),
-            ExpectedMove::whole_argument(&argument_types, 2, ExpectedLocation::Gpr(2)),
-            ExpectedMove::whole_argument(&argument_types, 3, ExpectedLocation::Gpr(3)),
-            ExpectedMove::whole_argument(&argument_types, 4, ExpectedLocation::Gpr(4)),
-            ExpectedMove::whole_argument(&argument_types, 5, ExpectedLocation::Gpr(5)),
-            ExpectedMove::whole_argument(&argument_types, 6, ExpectedLocation::Stack(0)),
-        ];
-
-        assert_marshal_plan(&argument_types, None, &expected_moves, 8);
-    }
-
-    #[test]
-    fn floating_arguments_fill_eight_registers_before_using_the_stack() {
-        let argument_types = [
-            Type::F64,
-            Type::F64,
-            Type::F64,
-            Type::F64,
-            Type::F64,
-            Type::F64,
-            Type::F64,
-            Type::F64,
-            Type::F64,
-        ];
-        let expected_moves = [
-            ExpectedMove::whole_argument(&argument_types, 0, ExpectedLocation::Xmm(0)),
-            ExpectedMove::whole_argument(&argument_types, 1, ExpectedLocation::Xmm(1)),
-            ExpectedMove::whole_argument(&argument_types, 2, ExpectedLocation::Xmm(2)),
-            ExpectedMove::whole_argument(&argument_types, 3, ExpectedLocation::Xmm(3)),
-            ExpectedMove::whole_argument(&argument_types, 4, ExpectedLocation::Xmm(4)),
-            ExpectedMove::whole_argument(&argument_types, 5, ExpectedLocation::Xmm(5)),
-            ExpectedMove::whole_argument(&argument_types, 6, ExpectedLocation::Xmm(6)),
-            ExpectedMove::whole_argument(&argument_types, 7, ExpectedLocation::Xmm(7)),
-            ExpectedMove::whole_argument(&argument_types, 8, ExpectedLocation::Stack(0)),
-        ];
-
-        assert_marshal_plan(&argument_types, None, &expected_moves, 8);
-    }
-
-    #[test]
-    fn integer_and_vector_register_banks_are_allocated_independently() {
-        let argument_types = [Type::U64, Type::F64, Type::Pointer, Type::F32];
-        let expected_moves = [
-            ExpectedMove::whole_argument(&argument_types, 0, ExpectedLocation::Gpr(0)),
-            ExpectedMove::whole_argument(&argument_types, 1, ExpectedLocation::Xmm(0)),
-            ExpectedMove::whole_argument(&argument_types, 2, ExpectedLocation::Gpr(1)),
-            ExpectedMove::whole_argument(&argument_types, 3, ExpectedLocation::Xmm(1)),
-        ];
-
-        assert_marshal_plan(&argument_types, None, &expected_moves, 0);
-    }
-
-    #[test]
-    fn fields_in_one_eightbyte_are_merged_before_register_assignment() {
-        let integer_dominates_sse = struct_type(&[Type::U32, Type::F32]);
-        let sse_fields_share_one_eightbyte = struct_type(&[Type::F32, Type::F32]);
-        let argument_types = [integer_dominates_sse, sse_fields_share_one_eightbyte];
-        let expected_moves = [
-            ExpectedMove::whole_argument(&argument_types, 0, ExpectedLocation::Gpr(0)),
-            ExpectedMove::whole_argument(&argument_types, 1, ExpectedLocation::Xmm(0)),
-        ];
-
-        assert_marshal_plan(&argument_types, None, &expected_moves, 0);
-    }
-
-    #[test]
-    fn nested_boundary_crossing_values_plan_returns_and_mixed_arguments() {
-        let return_type = struct_type(&[Type::F32, struct_type(&[Type::U32, Type::F32])]);
-        let argument_types = [
-            return_type.clone(),
-            Type::U64,
-            Type::create_struct(vec![Type::U8; 17]).unwrap(),
-            struct_type(&[Type::F64]),
-        ];
-        let expected_moves = [
-            ExpectedMove::eightbyte(0, 0, 8, ExpectedLocation::Gpr(0)),
-            ExpectedMove::eightbyte(0, 8, 4, ExpectedLocation::Xmm(0)),
-            ExpectedMove::whole_argument(&argument_types, 1, ExpectedLocation::Gpr(1)),
-            ExpectedMove::whole_argument(&argument_types, 2, ExpectedLocation::Stack(0)),
-            ExpectedMove::whole_argument(&argument_types, 3, ExpectedLocation::Xmm(1)),
-        ];
-        assert_marshal_plan(&argument_types, Some(&return_type), &expected_moves, 24);
-        assert_eq!(
-            MarshalPlan::build(CallSignature::new(&argument_types, Some(&return_type)))
-                .return_strategy,
-            ReturnStrategy::TwoRegisters {
-                first_bank: RegisterBank::Gpr,
-                second_bank: RegisterBank::Xmm,
-                second_byte_length: 4,
-            },
-        );
-    }
-
-    #[test]
-    fn two_eightbyte_aggregates_use_registers_in_eightbyte_order() {
-        let cases = [
-            (
-                struct_type(&[Type::U64, Type::U64]),
-                ExpectedLocation::Gpr(0),
-                ExpectedLocation::Gpr(1),
-            ),
-            (
-                struct_type(&[Type::F64, Type::F64]),
-                ExpectedLocation::Xmm(0),
-                ExpectedLocation::Xmm(1),
-            ),
-            (
-                struct_type(&[Type::U64, Type::F64]),
-                ExpectedLocation::Gpr(0),
-                ExpectedLocation::Xmm(0),
-            ),
-            (
-                struct_type(&[Type::F64, Type::U64]),
-                ExpectedLocation::Xmm(0),
-                ExpectedLocation::Gpr(0),
-            ),
-        ];
-
-        for (argument_type, first_destination, second_destination) in cases {
-            let argument_types = [argument_type];
-            let expected_moves = [
-                ExpectedMove::eightbyte(0, 0, 8, first_destination),
-                ExpectedMove::eightbyte(0, 8, 8, second_destination),
-            ];
-
-            assert_marshal_plan(&argument_types, None, &expected_moves, 0);
-        }
-    }
-
-    #[test]
-    fn final_aggregate_eightbyte_only_copies_bytes_in_the_value() {
-        let argument_types = [struct_type(&[Type::F32, Type::F32, Type::F32])];
-        let expected_moves = [
-            ExpectedMove::eightbyte(0, 0, 8, ExpectedLocation::Xmm(0)),
-            ExpectedMove::eightbyte(0, 8, 4, ExpectedLocation::Xmm(1)),
-        ];
-
-        assert_marshal_plan(&argument_types, None, &expected_moves, 0);
-    }
-
-    #[test]
-    fn two_integer_eightbytes_spill_atomically_when_one_register_remains() {
-        let argument_types = [
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U128,
-            Type::U64,
-        ];
-        let expected_moves = [
-            ExpectedMove::whole_argument(&argument_types, 0, ExpectedLocation::Gpr(0)),
-            ExpectedMove::whole_argument(&argument_types, 1, ExpectedLocation::Gpr(1)),
-            ExpectedMove::whole_argument(&argument_types, 2, ExpectedLocation::Gpr(2)),
-            ExpectedMove::whole_argument(&argument_types, 3, ExpectedLocation::Gpr(3)),
-            ExpectedMove::whole_argument(&argument_types, 4, ExpectedLocation::Gpr(4)),
-            ExpectedMove::whole_argument(&argument_types, 5, ExpectedLocation::Stack(0)),
-            ExpectedMove::whole_argument(&argument_types, 6, ExpectedLocation::Gpr(5)),
-        ];
-
-        assert_marshal_plan(&argument_types, None, &expected_moves, 16);
-    }
-
-    #[test]
-    fn two_sse_eightbytes_spill_atomically_when_one_register_remains() {
-        let sse_pair = struct_type(&[Type::F64, Type::F64]);
-        let argument_types = [
-            Type::F64,
-            Type::F64,
-            Type::F64,
-            Type::F64,
-            Type::F64,
-            Type::F64,
-            Type::F64,
-            sse_pair,
-            Type::F64,
-        ];
-        let expected_moves = [
-            ExpectedMove::whole_argument(&argument_types, 0, ExpectedLocation::Xmm(0)),
-            ExpectedMove::whole_argument(&argument_types, 1, ExpectedLocation::Xmm(1)),
-            ExpectedMove::whole_argument(&argument_types, 2, ExpectedLocation::Xmm(2)),
-            ExpectedMove::whole_argument(&argument_types, 3, ExpectedLocation::Xmm(3)),
-            ExpectedMove::whole_argument(&argument_types, 4, ExpectedLocation::Xmm(4)),
-            ExpectedMove::whole_argument(&argument_types, 5, ExpectedLocation::Xmm(5)),
-            ExpectedMove::whole_argument(&argument_types, 6, ExpectedLocation::Xmm(6)),
-            ExpectedMove::whole_argument(&argument_types, 7, ExpectedLocation::Stack(0)),
-            ExpectedMove::whole_argument(&argument_types, 8, ExpectedLocation::Xmm(7)),
-        ];
-
-        assert_marshal_plan(&argument_types, None, &expected_moves, 16);
-    }
-
-    #[test]
-    fn mixed_aggregate_spill_does_not_consume_available_vector_register() {
-        let mixed_aggregate = struct_type(&[Type::U64, Type::F64]);
-        let argument_types = [
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            mixed_aggregate,
-            Type::F64,
-        ];
-        let expected_moves = [
-            ExpectedMove::whole_argument(&argument_types, 0, ExpectedLocation::Gpr(0)),
-            ExpectedMove::whole_argument(&argument_types, 1, ExpectedLocation::Gpr(1)),
-            ExpectedMove::whole_argument(&argument_types, 2, ExpectedLocation::Gpr(2)),
-            ExpectedMove::whole_argument(&argument_types, 3, ExpectedLocation::Gpr(3)),
-            ExpectedMove::whole_argument(&argument_types, 4, ExpectedLocation::Gpr(4)),
-            ExpectedMove::whole_argument(&argument_types, 5, ExpectedLocation::Gpr(5)),
-            ExpectedMove::whole_argument(&argument_types, 6, ExpectedLocation::Stack(0)),
-            ExpectedMove::whole_argument(&argument_types, 7, ExpectedLocation::Xmm(0)),
-        ];
-
-        assert_marshal_plan(&argument_types, None, &expected_moves, 16);
-    }
-
-    #[test]
-    fn mixed_aggregate_spill_does_not_consume_available_integer_register() {
-        let mixed_aggregate = struct_type(&[Type::F64, Type::U64]);
-        let argument_types = [
-            Type::F64,
-            Type::F64,
-            Type::F64,
-            Type::F64,
-            Type::F64,
-            Type::F64,
-            Type::F64,
-            Type::F64,
-            mixed_aggregate,
-            Type::U64,
-        ];
-        let expected_moves = [
-            ExpectedMove::whole_argument(&argument_types, 0, ExpectedLocation::Xmm(0)),
-            ExpectedMove::whole_argument(&argument_types, 1, ExpectedLocation::Xmm(1)),
-            ExpectedMove::whole_argument(&argument_types, 2, ExpectedLocation::Xmm(2)),
-            ExpectedMove::whole_argument(&argument_types, 3, ExpectedLocation::Xmm(3)),
-            ExpectedMove::whole_argument(&argument_types, 4, ExpectedLocation::Xmm(4)),
-            ExpectedMove::whole_argument(&argument_types, 5, ExpectedLocation::Xmm(5)),
-            ExpectedMove::whole_argument(&argument_types, 6, ExpectedLocation::Xmm(6)),
-            ExpectedMove::whole_argument(&argument_types, 7, ExpectedLocation::Xmm(7)),
-            ExpectedMove::whole_argument(&argument_types, 8, ExpectedLocation::Stack(0)),
-            ExpectedMove::whole_argument(&argument_types, 9, ExpectedLocation::Gpr(0)),
-        ];
-
-        assert_marshal_plan(&argument_types, None, &expected_moves, 16);
-    }
-
-    #[test]
-    fn memory_argument_uses_the_stack_without_consuming_registers() {
-        let memory_argument = struct_type(&[Type::U64, Type::U64, Type::U64]);
-        let argument_types = [memory_argument, Type::U64, Type::F64];
-        let expected_moves = [
-            ExpectedMove::whole_argument(&argument_types, 0, ExpectedLocation::Stack(0)),
-            ExpectedMove::whole_argument(&argument_types, 1, ExpectedLocation::Gpr(0)),
-            ExpectedMove::whole_argument(&argument_types, 2, ExpectedLocation::Xmm(0)),
-        ];
-
-        assert_marshal_plan(&argument_types, None, &expected_moves, 24);
-    }
-
-    #[test]
-    fn stack_arguments_follow_argument_order_and_alignment_requirements() {
-        let memory_argument = struct_type(&[Type::U64, Type::U64, Type::U64]);
-        let argument_types = [
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U8,
-            Type::U128,
-            Type::U32,
-            memory_argument,
-        ];
-        let expected_moves = [
-            ExpectedMove::whole_argument(&argument_types, 0, ExpectedLocation::Gpr(0)),
-            ExpectedMove::whole_argument(&argument_types, 1, ExpectedLocation::Gpr(1)),
-            ExpectedMove::whole_argument(&argument_types, 2, ExpectedLocation::Gpr(2)),
-            ExpectedMove::whole_argument(&argument_types, 3, ExpectedLocation::Gpr(3)),
-            ExpectedMove::whole_argument(&argument_types, 4, ExpectedLocation::Gpr(4)),
-            ExpectedMove::whole_argument(&argument_types, 5, ExpectedLocation::Gpr(5)),
-            ExpectedMove::whole_argument(&argument_types, 6, ExpectedLocation::Stack(0)),
-            ExpectedMove::whole_argument(&argument_types, 7, ExpectedLocation::Stack(16)),
-            ExpectedMove::whole_argument(&argument_types, 8, ExpectedLocation::Stack(32)),
-            ExpectedMove::whole_argument(&argument_types, 9, ExpectedLocation::Stack(40)),
-        ];
-
-        assert_marshal_plan(&argument_types, None, &expected_moves, 64);
-    }
-
-    #[test]
-    fn memory_return_reserves_first_integer_argument_register() {
-        let return_type = struct_type(&[Type::U64, Type::U64, Type::U64]);
-        let argument_types = [
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-        ];
-        let expected_moves = [
-            ExpectedMove::whole_argument(&argument_types, 0, ExpectedLocation::Gpr(1)),
-            ExpectedMove::whole_argument(&argument_types, 1, ExpectedLocation::Gpr(2)),
-            ExpectedMove::whole_argument(&argument_types, 2, ExpectedLocation::Gpr(3)),
-            ExpectedMove::whole_argument(&argument_types, 3, ExpectedLocation::Gpr(4)),
-            ExpectedMove::whole_argument(&argument_types, 4, ExpectedLocation::Gpr(5)),
-            ExpectedMove::whole_argument(&argument_types, 5, ExpectedLocation::Stack(0)),
-        ];
-
-        assert_marshal_plan(&argument_types, Some(&return_type), &expected_moves, 8);
-    }
-
-    #[test]
-    fn memory_return_does_not_consume_vector_argument_registers() {
-        let return_type = struct_type(&[Type::U64, Type::U64, Type::U64]);
-        let argument_types = [Type::F64, Type::F32];
-        let expected_moves = [
-            ExpectedMove::whole_argument(&argument_types, 0, ExpectedLocation::Xmm(0)),
-            ExpectedMove::whole_argument(&argument_types, 1, ExpectedLocation::Xmm(1)),
-        ];
-
-        assert_marshal_plan(&argument_types, Some(&return_type), &expected_moves, 0);
-    }
-
-    #[test]
-    fn memory_return_participates_in_atomic_argument_register_allocation() {
-        let return_type = struct_type(&[Type::U64, Type::U64, Type::U64]);
-        let argument_types = [
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U64,
-            Type::U128,
-            Type::U64,
-        ];
-        let expected_moves = [
-            ExpectedMove::whole_argument(&argument_types, 0, ExpectedLocation::Gpr(1)),
-            ExpectedMove::whole_argument(&argument_types, 1, ExpectedLocation::Gpr(2)),
-            ExpectedMove::whole_argument(&argument_types, 2, ExpectedLocation::Gpr(3)),
-            ExpectedMove::whole_argument(&argument_types, 3, ExpectedLocation::Gpr(4)),
-            ExpectedMove::whole_argument(&argument_types, 4, ExpectedLocation::Stack(0)),
-            ExpectedMove::whole_argument(&argument_types, 5, ExpectedLocation::Gpr(5)),
-        ];
-
-        assert_marshal_plan(&argument_types, Some(&return_type), &expected_moves, 16);
-    }
-
-    #[test]
-    fn register_returns_do_not_consume_argument_registers() {
-        let argument_types = [Type::U64, Type::F64];
-        let expected_moves = [
-            ExpectedMove::whole_argument(&argument_types, 0, ExpectedLocation::Gpr(0)),
-            ExpectedMove::whole_argument(&argument_types, 1, ExpectedLocation::Xmm(0)),
-        ];
-        let return_types = [
-            Type::U64,
-            Type::F64,
-            struct_type(&[Type::U64, Type::U64]),
-            struct_type(&[Type::F64, Type::F64]),
-        ];
-
-        for return_type in return_types {
-            assert_marshal_plan(&argument_types, Some(&return_type), &expected_moves, 0);
-        }
-    }
-
-    #[test]
-    fn void_return_does_not_consume_argument_registers() {
-        let argument_types = [Type::U64, Type::F64];
-        let expected_moves = [
-            ExpectedMove::whole_argument(&argument_types, 0, ExpectedLocation::Gpr(0)),
-            ExpectedMove::whole_argument(&argument_types, 1, ExpectedLocation::Xmm(0)),
-        ];
-
-        assert_marshal_plan(&argument_types, None, &expected_moves, 0);
     }
 }

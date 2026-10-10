@@ -31,14 +31,14 @@ macro_rules! discard_return_test {
         fn $name:ident() -> $ty:ty = $val:expr,
         calls: $calls:literal
     ) => {
+        use core::mem::MaybeUninit;
+        use core::ptr;
+
+        use crate::function::{Function, arg, ret};
+        use crate::types::{FfiType, Type};
+
         #[test]
         fn $name() {
-            use core::mem::MaybeUninit;
-            use core::ptr;
-
-            use crate::function::{Function, arg, ret};
-            use crate::types::{FfiType, Type};
-
             unsafe extern $extern_abi fn test_callback(call_count: *mut usize) -> $ty {
                 // SAFETY: The test supplies a pointer to its initialized, writable counter.
                 unsafe { *call_count += 1; }
@@ -144,6 +144,32 @@ macro_rules! single_value_tests_for_abi {
             single_value_test_cases! {
                 abi: $abi,
                 extern_abi: $extern_abi,
+
+                bytes_4: crate::test_utils::structs::Bytes<4> = crate::test_utils::structs::BYTES_4_ARG;
+                bytes_5: crate::test_utils::structs::Bytes<5> = crate::test_utils::structs::BYTES_5_ARG;
+                bytes_6: crate::test_utils::structs::Bytes<6> = crate::test_utils::structs::BYTES_6_ARG;
+                bytes_8: crate::test_utils::structs::Bytes<8> = crate::test_utils::structs::BYTES_8_ARG;
+                bytes_9: crate::test_utils::structs::Bytes<9> = crate::test_utils::structs::BYTES_9_ARG;
+                bytes_10: crate::test_utils::structs::Bytes<10> = crate::test_utils::structs::BYTES_10_ARG;
+                bytes_11: crate::test_utils::structs::Bytes<11> = crate::test_utils::structs::BYTES_11_ARG;
+                bytes_12: crate::test_utils::structs::Bytes<12> = crate::test_utils::structs::BYTES_12_ARG;
+                bytes_13: crate::test_utils::structs::Bytes<13> = crate::test_utils::structs::BYTES_13_ARG;
+                bytes_14: crate::test_utils::structs::Bytes<14> = crate::test_utils::structs::BYTES_14_ARG;
+                bytes_16: crate::test_utils::structs::Bytes<16> = crate::test_utils::structs::BYTES_16_ARG;
+                bytes_17: crate::test_utils::structs::Bytes<17> = crate::test_utils::structs::BYTES_17_ARG;
+                nested_f32_u32_f32: crate::test_utils::structs::NestedF32U32F32 = crate::test_utils::structs::NESTED_F32_U32_F32_ARG;
+                nested_f32_f32_u32: crate::test_utils::structs::NestedF32F32U32 = crate::test_utils::structs::NESTED_F32_F32_U32_ARG;
+                f64_union_f64_u64: crate::test_utils::structs::F64UnionF64U64 = crate::test_utils::structs::F64_UNION_F64_U64_ARG;
+                f64_union_u64_f64: crate::test_utils::structs::F64UnionU64F64 = crate::test_utils::structs::F64_UNION_U64_F64_ARG;
+                union_f32_f64: crate::test_utils::unions::UnionF32F64 = crate::test_utils::unions::UNION_F32_F64_ARG;
+                union_f32_u32: crate::test_utils::unions::UnionF32U32 = crate::test_utils::unions::UNION_F32_U32_ARG;
+                union_f64_u64_f64x2: crate::test_utils::unions::UnionF64U64F64x2 = crate::test_utils::unions::UNION_F64_U64_F64X2_ARG;
+                union_f32x3_u8_f64: crate::test_utils::unions::UnionF32x3U8F64 = crate::test_utils::unions::UNION_F32X3_U8_F64_ARG;
+                union_u8_f64_f32x3: crate::test_utils::unions::UnionU8F64F32x3 = crate::test_utils::unions::UNION_U8_F64_F32X3_ARG;
+                union_f64_u64: crate::test_utils::unions::UnionF64U64 = crate::test_utils::unions::UNION_F64_U64_ARG;
+                union_u8_f64x2: crate::test_utils::unions::UnionU8F64x2 = crate::test_utils::unions::UNION_U8_F64X2_ARG;
+                union_bytes_17: crate::test_utils::unions::UnionBytes17 = crate::test_utils::unions::UNION_BYTES_17_ARG;
+                union_bytes_17_u128: crate::test_utils::unions::UnionBytes17U128 = crate::test_utils::unions::UNION_BYTES_17_U128_ARG;
                 i8: i8 = crate::test_utils::I8_ARG, discard: 1;
                 i16: i16 = crate::test_utils::I16_ARG;
                 i32: i32 = crate::test_utils::I32_ARG;
