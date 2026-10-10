@@ -376,9 +376,9 @@ pub struct FfiTypeLayout {
 impl FfiTypeLayout {
     /// Appends a struct field and returns its offset before advancing past it.
     pub(crate) fn append_field(&mut self, field: Self) -> usize {
-        self.size += padding_needed(self.size, field.align);
-        let offset = self.size;
-        self.size += field.size;
+        let offset = self.size.strict_add(padding_needed(self.size, field.align));
+        let size = offset.strict_add(field.size);
+        self.size = size;
         self.align = self.align.max(field.align);
         offset
     }
@@ -389,7 +389,7 @@ impl FfiTypeLayout {
     }
 
     pub(crate) fn pad_to_alignment(&mut self) {
-        self.size += padding_needed(self.size, self.align);
+        self.size = self.size.strict_add(padding_needed(self.size, self.align));
     }
 }
 
@@ -500,23 +500,28 @@ impl Type {
     }
 
     /// Returns this type's size and alignment.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a type's size, including alignment padding, overflows `usize`.
     pub fn layout(&self) -> FfiTypeLayout {
         TypeRef::from(self).layout()
     }
 
     /// Returns struct field offsets in declaration order, or an empty vector for other types.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a field's layout, aligned offset, or end offset overflows `usize`.
     pub fn field_offsets(&self) -> Vec<usize> {
         // TODO benchmark whether it is worth it to combine `Type::layout` and `Type::field_offsets`
         // for structs to avoid iterating over fields twice.
         if let Type::Struct(type_vec) = self {
             let mut offsets = Vec::with_capacity(type_vec.as_slice().len());
-            let mut offset = 0;
+            let mut layout = FfiTypeLayout { align: 1, size: 0 };
 
             for field in type_vec.as_slice() {
-                let field_layout = field.layout();
-                offset += padding_needed(offset, field_layout.align);
-                offsets.push(offset);
-                offset += field_layout.size;
+                offsets.push(layout.append_field(field.layout()));
             }
 
             offsets

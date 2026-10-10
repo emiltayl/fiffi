@@ -74,7 +74,9 @@ impl MarshalPlan {
             if argument_class == ValueClass::Indirect {
                 // Copies and the outgoing stack allocation base are 16-byte aligned.
                 // Revisit this when adding types with greater alignment.
-                stack_allocation_size = stack_allocation_size.next_multiple_of(16);
+                stack_allocation_size = stack_allocation_size
+                    .checked_next_multiple_of(16)
+                    .expect("Win64 indirect-copy alignment overflow");
                 let argument_copy_offset = stack_allocation_size;
 
                 debug_assert!(argument_layout.align <= 16);
@@ -89,7 +91,7 @@ impl MarshalPlan {
 
                 argument_moves.push(destination.address_move(argument_copy_offset));
 
-                stack_allocation_size += argument_layout.size;
+                stack_allocation_size = stack_allocation_size.strict_add(argument_layout.size);
             } else {
                 argument_moves
                     .push(destination.argument_move(argument_index, argument_layout.size));
@@ -236,6 +238,7 @@ impl ArgumentMove {
     }
 
     fn register_move(source: usize, index: usize, size: usize, kind: ArgumentMoveKind) -> Self {
+        // Slot allocation bounds indices to 0..4, so shifting them cannot overflow.
         debug_assert!(index <= Self::REGISTER_INDEX_MASK);
         debug_assert!(matches!(
             kind,
@@ -340,6 +343,8 @@ impl RegisterSlotAllocator {
     }
 
     fn take_slot(&mut self) -> usize {
+        // `allocate` checks availability, keeping the index below four and the counter at most
+        // four.
         let slot = self.next_slot;
         self.next_slot += 1;
 

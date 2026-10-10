@@ -49,6 +49,7 @@ impl RegisterSummary {
 
     fn for_scalar(scalar: ScalarType) -> Self {
         let layout = TypeRef::Scalar(scalar).layout();
+        debug_assert!((1..=16).contains(&layout.size));
         let occupied_bytes = u16::MAX >> (16 - layout.size);
 
         match scalar {
@@ -78,6 +79,9 @@ impl RegisterSummary {
     }
 
     fn include_at(&mut self, child: Self, offset: usize) {
+        // Classification only summarizes nonempty types of at most 16 bytes.
+        debug_assert!(offset < 16);
+        debug_assert!(child.layout.size <= 16 - offset);
         self.integer_bytes |= child.integer_bytes << offset;
         self.sse_bytes |= child.sse_bytes << offset;
     }

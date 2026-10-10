@@ -80,6 +80,7 @@ impl<'arg> CallFrame<'arg> {
                 let return_align = 1usize
                     .checked_shl(u32::from(return_align))
                     .expect("invalid SysV return alignment");
+                // The outgoing allocation base supports alignments up to 16 bytes.
                 debug_assert!(return_align <= 16);
 
                 let ret_ptr_offset = call_frame
@@ -194,6 +195,9 @@ pub(crate) unsafe fn call(
 /// Invokes a function, reading arguments directly and copying values into its outgoing stack
 /// allocation as directed by the plan.
 ///
+/// Stack setup traps on allocation-address subtraction underflow before alignment or probing.
+/// This guard does not guarantee that enough mapped stack exists.
+///
 /// # Safety
 ///
 /// * The frame must remain writable for the call.
@@ -204,7 +208,8 @@ pub(crate) unsafe fn call(
 ///   source offsets must be zero or eight, with offset + size within the argument layout. Stack
 ///   offsets must have their low three bits clear (zero is valid); offset + size must fit inside
 ///   the allocation. Stack copies start at source offset zero and use exact byte counts.
-/// * The allocation size must not wrap the stack address, and supported alignments are at most 16.
+/// * Enough stack must be available for the allocation and up to 15 bytes of alignment padding;
+///   supported alignments are at most 16.
 /// * The plan, arguments, and return storage must match the target's ABI and signature.
 /// * Any return storage must remain writable for the signature throughout the call.
 #[unsafe(naked)]

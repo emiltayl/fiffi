@@ -71,6 +71,8 @@ impl MarshalPlan {
                     ));
                 }
                 Some(RegisterAllocation::Two(first_destination, second_destination)) => {
+                    // Two-eightbyte classes have payloads of 9 through 16 bytes.
+                    debug_assert!((9..=16).contains(&argument_layout.size));
                     argument_moves.push(first_destination.argument_move(
                         source,
                         0,
@@ -161,6 +163,7 @@ impl ArgumentMove {
         } else {
             index < ARGUMENT_XMM_COUNT
         });
+        // Allocation bounds indices below eight, so their encoding shifts cannot overflow.
         debug_assert!(matches!(source_offset, 0 | 8));
         debug_assert!((1..=8).contains(&size));
 
@@ -255,11 +258,15 @@ impl ReturnStrategy {
 
         match register_requirements {
             RegisterRequirements::One(bank) => Self::SingleRegister { bank, byte_length },
-            RegisterRequirements::Two(first_bank, second_bank) => Self::TwoRegisters {
-                first_bank,
-                second_bank,
-                second_byte_length: byte_length - 8,
-            },
+            RegisterRequirements::Two(first_bank, second_bank) => {
+                // Two-eightbyte classes have payloads of 9 through 16 bytes.
+                debug_assert!((9..=16).contains(&byte_length));
+                Self::TwoRegisters {
+                    first_bank,
+                    second_bank,
+                    second_byte_length: byte_length - 8,
+                }
+            }
         }
     }
 }
@@ -350,11 +357,13 @@ impl RegisterAllocator {
     fn space_available_for(&self, requirements: RegisterRequirements) -> bool {
         let (gpr_required, xmm_required) = requirements.counts();
 
+        // Counters are at most six/eight and each requirement is at most two registers.
         (self.next_gpr_index + gpr_required) <= ARGUMENT_GPR_COUNT
             && (self.next_xmm_index + xmm_required) <= ARGUMENT_XMM_COUNT
     }
 
     fn take(&mut self, bank: RegisterBank) -> AllocatedRegister {
+        // `allocate` checks both banks first, keeping these increments within their capacities.
         let index = match bank {
             RegisterBank::Gpr => {
                 let index = self.next_gpr_index;

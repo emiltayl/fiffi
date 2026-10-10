@@ -82,13 +82,16 @@ impl<'arg> CallFrame<'arg> {
                 let return_align = 1usize
                     .checked_shl(u32::from(return_align))
                     .expect("invalid Win64 return alignment");
+                // The outgoing allocation base supports alignments up to 16 bytes.
+                debug_assert!(return_align <= 16);
                 let ret_ptr_offset = call_frame
                     .stack_allocation_len
-                    .next_multiple_of(return_align);
+                    .checked_next_multiple_of(return_align)
+                    .expect("Win64 discarded-return alignment overflow");
 
                 call_frame.return_pointer = ret_ptr_offset;
                 call_frame.return_pointer_is_offset = true;
-                call_frame.stack_allocation_len = ret_ptr_offset + return_size;
+                call_frame.stack_allocation_len = ret_ptr_offset.strict_add(return_size);
             }
         }
 
@@ -167,6 +170,9 @@ pub(crate) unsafe fn call(
 /// Invokes a function, reading arguments directly and copying values into its outgoing stack
 /// allocation as directed by the plan.
 ///
+/// Stack setup traps on allocation-address subtraction underflow before alignment or probing.
+/// This guard does not guarantee that enough mapped stack exists.
+///
 /// # Safety
 ///
 /// * The frame must remain writable for the call.
@@ -175,6 +181,8 @@ pub(crate) unsafe fn call(
 /// * The internal plan must supply valid kinds, argument indices, register slots, and bounds.
 ///   Register payloads must be 1, 2, 4, or 8 bytes. Stack offsets must have their low three bits
 ///   clear and include shadow space; indirect copies must be sixteen-byte aligned.
+/// * Enough stack must be available for the allocation and up to 15 bytes of alignment padding;
+///   supported alignments are at most 16.
 /// * The plan, arguments, and return storage must match the target's ABI and signature.
 /// * Any return storage must remain writable for the signature throughout the call.
 #[unsafe(naked)]
