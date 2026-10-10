@@ -4,7 +4,7 @@ use core::ptr;
 use super::plan::{ArgumentMove, ArgumentMoveKind, MarshalPlan, RegisterBank, ReturnStrategy};
 use crate::FnPtr;
 use crate::backend::x86_64::Register;
-use crate::backend::x86_64::asm::stack_setup_asm;
+use crate::backend::x86_64::asm::{hidden_return_asm, stack_copy_asm, stack_setup_asm};
 use crate::function::{Arg, Ret};
 
 // Dispatch uses bit zero to select a register bank and reads Arg as one pointer. Field
@@ -255,7 +255,7 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         ".seh_endprologue",
 
         "mov r12, rdi",
-        stack_setup_asm!("[r12 + {stack_allocation_len_offset}]"),
+        stack_setup_asm!(),
 
         // Registers:
         // * r10: Current ArgumentMove pointer
@@ -402,44 +402,7 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         "movq xmm6, rax",
         "jmp 2900f",
 
-        // Copy exact byte counts, including odd and zero lengths, leaving slot padding untouched.
-        // The ABI requires a clear direction flag; source storage cannot overlap this allocation.
-        "2400:",
-        "mov rax, [r10 + {move_source_offset}]",
-        "mov rsi, [r12 + {arguments_offset}]",
-        "mov rsi, [rsi + rax * {arg_stride}]",
-        "and rdi, {stack_offset_mask}",
-        "lea rdi, [rsp + rdi]",
-        "mov rcx, [r10 + {move_size_offset}]",
-        // If we are moving 8, 4, 2, or 1 bytes, do it with mov instructions instead of `rep movsb`.
-        "cmp rcx, 8",
-        "je 2418f",
-        "cmp rcx, 4",
-        "je 2414f",
-        "cmp rcx, 2",
-        "je 2412f",
-        "cmp rcx, 1",
-        "je 2411f",
-        // All other lengths, including zero.
-        "rep movsb",
-        "jmp 2900f",
-
-        "2418:",
-        "mov rax, [rsi]",
-        "mov [rdi], rax",
-        "jmp 2900f",
-        "2414:",
-        "mov eax, [rsi]",
-        "mov [rdi], eax",
-        "jmp 2900f",
-        "2412:",
-        "movzx eax, word ptr [rsi]",
-        "mov [rdi], ax",
-        "jmp 2900f",
-        "2411:",
-        "movzx eax, byte ptr [rsi]",
-        "mov [rdi], al",
-        "jmp 2900f",
+        stack_copy_asm!("2900f"),
 
         // Shared GPR writer for argument payloads.
         "2700:",
@@ -483,15 +446,7 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         "movq rsi, xmm9",
         "movq rcx, xmm10",
 
-        // Deliver hidden return storage after argument marshalling. Resolve offset mode first:
-        // a discarded return can start at rsp + 0, whereas (0, false) denotes no hidden return.
-        "mov rax, [r12 + {return_pointer_offset}]",
-        "cmp byte ptr [r12 + {return_pointer_is_offset_offset}], 0",
-        "je 3010f",
-        "add rax, rsp",
-        "3010:",
-        "test rax, rax",
-        "cmovnz rdi, rax",
+        hidden_return_asm!("rdi"),
 
         // Set the vector count after all payload and hidden-pointer work that uses rax.
         "mov al, [r12 + {al_offset}]",

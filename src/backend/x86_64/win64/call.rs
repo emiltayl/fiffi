@@ -4,7 +4,7 @@ use core::ptr;
 use super::plan::{ArgumentMoveKind, MarshalPlan, ReturnStrategy};
 use crate::FnPtr;
 use crate::backend::x86_64::Register;
-use crate::backend::x86_64::asm::stack_setup_asm;
+use crate::backend::x86_64::asm::{hidden_return_asm, stack_copy_asm, stack_setup_asm};
 use crate::backend::x86_64::win64::plan::ArgumentMove;
 use crate::function::{Arg, Ret};
 
@@ -28,7 +28,8 @@ struct CallFrame<'arg> {
     argument_move_len: usize,
     arguments: *const Arg<'arg>,
 
-    /// Hidden return storage address or offset from pre-call `rsp`; zero means absent.
+    /// Hidden return storage address or offset from pre-call `rsp`.
+    /// Only `(0, false)` is absent: offset zero denotes the allocation base.
     return_pointer: usize,
     /// Whether `return_pointer` includes shadow space and must be added to pre-call `rsp`.
     return_pointer_is_offset: bool,
@@ -243,7 +244,7 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
 
         // Keep the `CallFrame` pointer in a nonvolatile register across the target call.
         "mov r12, rcx",
-        stack_setup_asm!("[r12 + {stack_allocation_len_offset}]"),
+        stack_setup_asm!(),
 
         // arguments passed in: rcx, rdx, r8, r9
         // Registers:
@@ -330,44 +331,7 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
         "movq xmm2, rax",
         "jmp 2900f",
 
-        // Copy exact byte counts, including odd and zero lengths, leaving slot padding untouched.
-        // The ABI requires a clear direction flag; source storage cannot overlap this allocation.
-        "2400:",
-        "mov rax, [r10 + {move_source_offset}]",
-        "mov rsi, [r12 + {arguments_offset}]",
-        "mov rsi, [rsi + rax * {arg_stride}]",
-        "and rdi, {stack_offset_mask}",
-        "lea rdi, [rsp + rdi]",
-        "mov rcx, [r10 + {move_size_offset}]",
-        // If we are moving 8, 4, 2, or 1 bytes, do it with mov instructions instead of `rep movsb`.
-        "cmp rcx, 8",
-        "je 2418f",
-        "cmp rcx, 4",
-        "je 2414f",
-        "cmp rcx, 2",
-        "je 2412f",
-        "cmp rcx, 1",
-        "je 2411f",
-        // All other lengths, including zero.
-        "rep movsb",
-        "jmp 2900f",
-
-        "2418:",
-        "mov rax, [rsi]",
-        "mov [rdi], rax",
-        "jmp 2900f",
-        "2414:",
-        "mov eax, [rsi]",
-        "mov [rdi], eax",
-        "jmp 2900f",
-        "2412:",
-        "movzx eax, word ptr [rsi]",
-        "mov [rdi], ax",
-        "jmp 2900f",
-        "2411:",
-        "movzx eax, byte ptr [rsi]",
-        "mov [rdi], al",
-        "jmp 2900f",
+        stack_copy_asm!("2900f"),
 
         // StackAddressTo(Gpr|Stack).
         // Both stored stack offsets are already relative to pre-call rsp, including shadow space.
@@ -412,15 +376,7 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
         "3000:",
         "movq rcx, xmm4",
 
-        // Deliver hidden return storage after argument marshalling.
-        "mov rax, [r12 + {return_pointer_offset}]",
-        "test rax, rax",
-        "jz 3020f",
-        "lea r11, [rax + rsp]",
-        "cmp byte ptr [r12 + {return_pointer_is_offset_offset}], 0",
-        "cmovne rax, r11",
-        "mov rcx, rax",
-        "3020:",
+        hidden_return_asm!("rcx"),
 
         "mov r11, [r12 + {fn_ptr_offset}]",
         "call r11",

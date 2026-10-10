@@ -18,13 +18,13 @@ ABIs on common platforms, and then branch out from there as needed.
   * [x] Assembly: argument marshalling, the call and return value handling
 * [x] 64-bit x86 Win64 ABI for function calls
 * [x] Support discarding return value, add tests for this
-* [ ] Variadic test suite and support for variadics
-* [ ] Clean up x86_64 backend code and comments
-* [ ] Review test suite for missing test cases
-* [ ] Plan how to handle overflow in size calculations, document it explicitly
-  * [ ] Types
-  * [ ] Marshalling plan (stack buffer)
-  * [ ] Anything else?
+* [x] Variadic test suite and support for variadics
+* [x] Clean up x86_64 backend code and comments
+* [x] Review test suite for missing test cases
+* [x] Plan how to handle overflow in size calculations, document it explicitly
+  * [x] Types
+  * [x] Marshalling plan (stack buffer)
+  * [x] Anything else?
 * [ ] 32-bit x86 ABIs for function calls
 * [ ] Aarch64 ABIs for function calls
 * [ ] Review status
@@ -32,6 +32,8 @@ ABIs on common platforms, and then branch out from there as needed.
 
 # Work log
 
+* 2026-10-10 Various refactors and smaller changes. Most math should be checked now and some tests
+  have been moved out to the common function test suite.
 * 2026-09-11 Added variadic support.
 * 2026-09-10 Made it possible to discard return values for functions with a non-void return value.
 * 2026-08-30 Win64 function call support.
