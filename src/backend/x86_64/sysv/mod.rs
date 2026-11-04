@@ -2,6 +2,7 @@
 //!
 //! Aggregates use up to two eightbytes or pass on the stack. Outgoing stacks are 16-byte aligned.
 
+mod asm;
 mod call;
 mod classification;
 mod plan;

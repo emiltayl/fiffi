@@ -2,6 +2,7 @@
 //! Other arguments use eight-byte stack slots. Indirect copies and the outgoing stack are aligned
 //! to 16 bytes. Integer returns use `rax`; floats and 128-bit integers use `xmm0`.
 
+mod asm;
 mod call;
 mod classification;
 mod plan;
