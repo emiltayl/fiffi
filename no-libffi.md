@@ -25,13 +25,14 @@ ABIs on common platforms, and then branch out from there as needed.
   * [x] Types
   * [x] Marshalling plan (stack buffer)
   * [x] Anything else?
-* [ ] 32-bit x86 ABIs for function calls
+* [x] 32-bit x86 ABIs for function calls
 * [ ] Aarch64 ABIs for function calls
 * [ ] Review status
 * [ ] Closures?
 
 # Work log
 
+* 2026-11-04 Added function calls for x86 ABIs.
 * 2026-10-10 Various refactors and smaller changes. Most math should be checked now and some tests
   have been moved out to the common function test suite.
 * 2026-09-11 Added variadic support.

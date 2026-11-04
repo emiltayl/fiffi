@@ -19,6 +19,21 @@ macro_rules! call_shape_tests_for_abi {
             use crate::types::{FfiType, Type};
 
             #[test]
+            fn u128_roundtrip_with_trailing_integers() {
+                extern $extern_abi fn callback(wide: u128, after: u32, last: u32) -> u128 {
+                    assert_eq!(wide, U128_ARG);
+                    assert_eq!(after, 0x1357_9bdf);
+                    assert_eq!(last, 0x2468_ace0);
+                    wide
+                }
+
+                let output = call_ffi_fn!(abi: $abi, callback(
+                    u128 = U128_ARG, u32 = 0x1357_9bdf, u32 = 0x2468_ace0,
+                ) -> u128);
+                assert_eq!(output, U128_ARG);
+            }
+
+            #[test]
             fn stack_alignment_after_an_existing_small_spill() {
                 extern $extern_abi fn capture(
                     a: u64, b: u64, c: u64, d: u64, e: u64, f: u64,

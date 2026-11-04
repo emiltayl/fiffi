@@ -1,6 +1,7 @@
 use core::ptr;
 
 use crate::function::{Function, arg, ret};
+use crate::test_utils::{GuardedReturn, U128_ARG};
 use crate::types::{Type, VariadicType};
 
 const SENTINEL: u64 = 0xd4c3_b2a1_9876_5432;
@@ -143,6 +144,71 @@ fn types() {
     }
 
     assert_eq!(result, expected_mask(arguments.len()));
+}
+
+#[test]
+fn fixed_i8_f32_with_u128_return() {
+    unsafe extern "C-unwind" fn callback(marker: i8, single: f32, mut args: ...) -> u128 {
+        assert_eq!(marker, -117);
+        assert_eq!(single, -12.5);
+
+        // SAFETY: The caller supplies exactly these four already-promoted arguments in
+        // this order and with these types. The pointer refers to a live, writable counter.
+        unsafe {
+            assert_eq!(args.next_arg::<i32>(), -0x1234_5678);
+            assert_eq!(args.next_arg::<f64>(), -123.25);
+            assert_eq!(args.next_arg::<u64>(), 0xfedc_ba98_7654_3210);
+            let counter = args.next_arg::<*mut usize>();
+            *counter += 1;
+        }
+
+        U128_ARG
+    }
+
+    let function = Function::variadic(
+        crate::fn_ptrize!(callback),
+        &[Type::I8, Type::F32],
+        &[
+            VariadicType::I32,
+            VariadicType::F64,
+            VariadicType::U64,
+            VariadicType::Pointer,
+        ],
+        Some(&Type::U128),
+    );
+    let marker: i8 = -117;
+    let single: f32 = -12.5;
+    let integer: i32 = -0x1234_5678;
+    let double: f64 = -123.25;
+    let wide: u64 = 0xfedc_ba98_7654_3210;
+    let mut call_count: usize = 0;
+    let counter_pointer = ptr::from_mut(&mut call_count);
+    let arguments = [
+        arg(&marker),
+        arg(&single),
+        arg(&integer),
+        arg(&double),
+        arg(&wide),
+        arg(&counter_pointer),
+    ];
+
+    // SAFETY: The default ABI matches `C-unwind`. The live fixed i8/f32 arguments and
+    // already-promoted tail match the signature and read order. The counter is writable,
+    // and the declared u128 return is discarded using the backend's return handling.
+    unsafe {
+        function.call(&arguments, None);
+    }
+    assert_eq!(call_count, 1);
+
+    let mut result = GuardedReturn::<u128>::new();
+    // SAFETY: The same signature and live arguments are reused, and the guarded return
+    // storage matches the declared u128 return type.
+    unsafe {
+        function.call(&arguments, Some(result.ret()));
+    }
+    assert_eq!(call_count, 2);
+    // SAFETY: The successful call initialized the u128 return value.
+    assert_eq!(unsafe { result.get() }, U128_ARG);
 }
 
 #[test]

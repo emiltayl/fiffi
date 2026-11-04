@@ -8,6 +8,11 @@ cfg_select! {
         use x86_64 as native;
     }
 
+    target_arch = "x86" => {
+        mod x86;
+        use x86 as native;
+    }
+
     _ => {
         compile_error!("`fiffi` is not supported on this platform");
     }
@@ -59,6 +64,7 @@ impl<'ty> CallSignature<'ty> {
             .strict_add(self.variadic.unwrap_or(&[]).len())
     }
 
+    #[cfg_attr(target_arch = "x86", expect(dead_code, reason = "Not used on x86"))]
     pub(crate) fn is_variadic(self) -> bool {
         self.variadic.is_some()
     }

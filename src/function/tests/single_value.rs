@@ -63,7 +63,7 @@ macro_rules! discard_return_test {
             assert_eq!(call_count, $calls);
 
             // Floating-point cases discard more than the eight x87 stack slots before capturing
-            // a result, so a future x86 backend must pop even discarded floating-point returns.
+            // a result, so the x86 backend must pop even discarded floating-point returns.
             if $calls > 1 {
                 let mut result = MaybeUninit::<$ty>::uninit();
                 // SAFETY: The signature and counter still match, and `result` is valid storage
@@ -145,6 +145,10 @@ macro_rules! single_value_tests_for_abi {
                 abi: $abi,
                 extern_abi: $extern_abi,
 
+                nested_single_f32: crate::function::tests::single_value::Wrapper<crate::function::tests::single_value::Wrapper<f32>> =
+                    crate::function::tests::single_value::NESTED_SINGLE_F32, discard: 32;
+                nested_single_f64: crate::function::tests::single_value::Wrapper<crate::function::tests::single_value::FloatUnion> =
+                    crate::function::tests::single_value::NESTED_SINGLE_F64, discard: 32;
                 bytes_4: crate::test_utils::structs::Bytes<4> = crate::test_utils::structs::BYTES_4_ARG;
                 bytes_5: crate::test_utils::structs::Bytes<5> = crate::test_utils::structs::BYTES_5_ARG;
                 bytes_6: crate::test_utils::structs::Bytes<6> = crate::test_utils::structs::BYTES_6_ARG;
@@ -339,3 +343,52 @@ pub(crate) use return_only_test;
 pub(crate) use roundtrip_test;
 pub(crate) use single_value_test_cases;
 pub(crate) use single_value_tests_for_abi;
+
+// Nested struct/union wrappers distinguish the general x86 float-return rule from
+// MSVC integer returns and from aggregates with additional nonzero-sized fields.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+pub(super) struct Wrapper<T> {
+    value: T,
+}
+
+// SAFETY: Wrapper is a natural repr(C) struct containing exactly the described T.
+unsafe impl<T: crate::types::FfiType> crate::types::FfiType for Wrapper<T> {
+    fn ffi_type() -> crate::types::Type {
+        crate::types::Type::create_struct(vec![T::ffi_type()]).unwrap()
+    }
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub(super) union FloatUnion {
+    value: f64,
+}
+
+// SAFETY: FloatUnion has exactly one f64 variant.
+unsafe impl crate::types::FfiType for FloatUnion {
+    fn ffi_type() -> crate::types::Type {
+        crate::types::Type::create_union(vec![crate::types::Type::F64]).unwrap()
+    }
+}
+
+impl PartialEq for FloatUnion {
+    fn eq(&self, other: &Self) -> bool {
+        // SAFETY: The union's only variant is f64.
+        unsafe { self.value == other.value }
+    }
+}
+
+impl core::fmt::Debug for FloatUnion {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // SAFETY: The union's only variant is f64.
+        unsafe { self.value.fmt(f) }
+    }
+}
+
+pub(super) const NESTED_SINGLE_F32: Wrapper<Wrapper<f32>> = Wrapper {
+    value: Wrapper { value: -12.5 },
+};
+pub(super) const NESTED_SINGLE_F64: Wrapper<FloatUnion> = Wrapper {
+    value: FloatUnion { value: -123.25 },
+};

@@ -10,6 +10,7 @@ macro_rules! register_passing_test {
             $($extra_arg:ident: $extra_ty:ty = $extra_expected:expr),* $(,)?
         )
     ) => {
+        #[allow(unused_mut, reason = "Empty argument lists leave the counters unchanged.")]
         #[test]
         fn $name() {
             extern $extern_abi fn test_callback($($arg: $arg_ty,)* $($extra_arg: $extra_ty),*) -> usize {
@@ -69,6 +70,7 @@ macro_rules! hidden_return_pointer_test {
             $($arg:ident: $arg_ty:ty = $expected:expr),* $(,)?
         ) -> $return_ty:ty = $return_value:expr
     ) => {
+        #[allow(unused_mut, reason = "Empty argument lists leave the counters unchanged.")]
         #[test]
         fn $name() {
             extern $extern_abi fn test_callback($($arg: $arg_ty),*) -> $return_ty {
@@ -101,7 +103,8 @@ macro_rules! hidden_return_pointer_test {
 }
 
 // Removes up to the requested number of arguments from the end of a token list, then invokes
-// register_pressure_test! with the retained arguments.
+// register_pressure_test! with the retained arguments. Empty lists and requests exceeding the
+// available arguments retain no arguments; counts zero, one and two are supported.
 macro_rules! trim_register_args {
     (
         count: 0,
@@ -409,16 +412,11 @@ macro_rules! mixed_pressure_cases {
 
 pub(crate) use byte_pressure_cases;
 pub(crate) use mixed_pressure_cases;
+// Register names select leading scalar parameters, not assembly operands. Scenario names describe
+// pressure configurations; assertions check values rather than physical register placement. ABIs
+// with fewer registers can produce empty callbacks or repeated signatures, and float cases on
+// stack-only ABIs still verify argument delivery.
 macro_rules! register_passing_tests_for_abi {
-    (
-        abi: $abi:path,
-        extern_abi: $extern_abi:literal,
-        gpr_regs: [],
-        float_regs: [] $(,)?
-    ) => {
-        // If no arguments are passed in registers, we skip these tests
-    };
-
     (
         abi: $abi:path,
         extern_abi: $extern_abi:literal,

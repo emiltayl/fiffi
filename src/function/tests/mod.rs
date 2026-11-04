@@ -67,8 +67,8 @@ macro_rules! function_tests_for_abi {
             use crate::function::tests::call_shapes::call_shape_tests_for_abi;
             use crate::function::tests::edge_values::edge_value_tests_for_abi;
             use crate::function::tests::pass_by_value::pass_by_value_tests_for_abi;
-            use crate::function::tests::single_value::single_value_tests_for_abi;
             use crate::function::tests::register_passing::register_passing_tests_for_abi;
+            use crate::function::tests::single_value::single_value_tests_for_abi;
             use crate::function::tests::unwind::unwind_tests_for_abi;
 
             call_shape_tests_for_abi! {
@@ -133,5 +133,55 @@ function_tests_for_abi! {
         extern_abi: "win64-unwind",
         gpr_regs: [rcx, rdx, r8, r9],
         float_regs: [xmm0, xmm1, xmm2, xmm3],
+    }
+}
+
+#[cfg(all(target_arch = "x86", not(windows)))]
+function_tests_for_abi! {
+    mod x86_sysv {
+        abi: Abi::SysV,
+        extern_abi: "C-unwind",
+        gpr_regs: [],
+        float_regs: [],
+    }
+}
+
+#[cfg(target_arch = "x86")]
+function_tests_for_abi! {
+    mod x86_cdecl {
+        abi: Abi::Cdecl,
+        extern_abi: "cdecl-unwind",
+        gpr_regs: [],
+        float_regs: [],
+    }
+}
+
+#[cfg(target_arch = "x86")]
+function_tests_for_abi! {
+    mod x86_stdcall {
+        abi: Abi::Stdcall,
+        extern_abi: "stdcall-unwind",
+        gpr_regs: [],
+        float_regs: [],
+    }
+}
+
+#[cfg(target_arch = "x86")]
+function_tests_for_abi! {
+    mod x86_fastcall {
+        abi: Abi::Fastcall,
+        extern_abi: "fastcall-unwind",
+        gpr_regs: [ecx, edx],
+        float_regs: [],
+    }
+}
+
+#[cfg(target_arch = "x86")]
+function_tests_for_abi! {
+    mod x86_thiscall {
+        abi: Abi::Thiscall,
+        extern_abi: "thiscall-unwind",
+        gpr_regs: [ecx],
+        float_regs: [],
     }
 }

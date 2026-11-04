@@ -1,15 +1,61 @@
+#[cfg(panic = "unwind")]
+#[derive(Debug)]
+pub(super) struct UnwindMarker;
+
+#[cfg(panic = "unwind")]
+pub(super) struct DropCounter<'a>(pub &'a core::sync::atomic::AtomicUsize);
+
+#[cfg(panic = "unwind")]
+impl Drop for DropCounter<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(panic = "unwind")]
+pub(super) fn assert_unwind_marker(result: std::thread::Result<()>) {
+    let payload = result.expect_err("The callback returned instead of unwinding");
+    assert!(
+        payload.is::<UnwindMarker>(),
+        "The call propagated an unexpected panic payload"
+    );
+}
+
 macro_rules! unwind_tests_for_abi {
     (abi: $abi:path, extern_abi: $extern_abi:literal $(,)?) => {
         #[cfg(panic = "unwind")]
         mod unwind {
-            use core::sync::atomic::{AtomicBool, Ordering};
+            use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
             use std::panic::{catch_unwind, panic_any};
 
             use crate::function::tests::helpers::call_ffi_fn;
+            use crate::function::tests::unwind::{DropCounter, UnwindMarker, assert_unwind_marker};
             use crate::test_utils::structs::{U8X3_ARG, U8x3, U64X2_ARG, U64x2};
 
-            #[derive(Debug)]
-            struct UnwindMarker;
+            #[test]
+            fn panic_unwinds_through_nested_calls() {
+                unsafe extern $extern_abi fn inner(object: *const AtomicUsize, wide: u128) -> u128 {
+                    // SAFETY: The test owns the live counter throughout both calls.
+                    let _guard = DropCounter(unsafe { &*object });
+                    assert_eq!(wide, crate::test_utils::U128_ARG);
+                    panic_any(UnwindMarker);
+                }
+                unsafe extern $extern_abi fn outer(object: *const AtomicUsize, wide: u128) -> u128 {
+                    // SAFETY: The test owns the live counter throughout both calls.
+                    let _guard = DropCounter(unsafe { &*object });
+                    call_ffi_fn!(abi: $abi, inner(*const AtomicUsize = object, u128 = wide) -> u128)
+                }
+
+                let drops = AtomicUsize::new(0);
+                let object = &raw const drops;
+                let result = catch_unwind(|| {
+                    call_ffi_fn!(abi: $abi, outer(
+                        *const AtomicUsize = object, u128 = crate::test_utils::U128_ARG,
+                    ) -> u128);
+                });
+                assert_unwind_marker(result);
+                assert_eq!(drops.load(Ordering::Relaxed), 2);
+            }
 
             struct DropGuard<'flag>(&'flag AtomicBool);
 
@@ -17,14 +63,6 @@ macro_rules! unwind_tests_for_abi {
                 fn drop(&mut self) {
                     self.0.store(true, Ordering::Relaxed);
                 }
-            }
-
-            fn assert_unwind_marker(result: std::thread::Result<()>) {
-                let payload = result.expect_err("The callback returned instead of unwinding");
-                assert!(
-                    payload.is::<UnwindMarker>(),
-                    "The call propagated an unexpected panic payload"
-                );
             }
 
             #[test]
@@ -178,23 +216,6 @@ macro_rules! unwind_tests_for_abi {
                     identity_callback(usize = 42) -> usize
                 );
                 assert_eq!(result, 42);
-            }
-
-            #[test]
-            fn panic_unwinds_through_nested_calls() {
-                extern $extern_abi fn inner_callback() {
-                    panic_any(UnwindMarker);
-                }
-
-                extern $extern_abi fn outer_callback() {
-                    call_ffi_fn!(abi: $abi, inner_callback());
-                }
-
-                let result = catch_unwind(|| {
-                    call_ffi_fn!(abi: $abi, outer_callback());
-                });
-
-                assert_unwind_marker(result);
             }
         }
     };
