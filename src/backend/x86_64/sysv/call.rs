@@ -226,6 +226,8 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         //   rbp + 8        saved rbp
         //   rbp            saved r12
         //   below rbp      dynamic outgoing allocation, including alignment padding
+        // With Windows CFG hooks, an additional push r13 precedes mov rbp, rsp:
+        // saved r13 is at rbp, and each slot above it moves up by eight bytes.
         // After stack setup, relative to rsp immediately before call r11:
         //   rsp + 0...     target's stack arguments, with planned alignment gaps
         //   following     optional aligned discarded-return storage
@@ -246,6 +248,10 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         ".cfi_offset r12, -24",
         #[cfg(windows)]
         ".seh_pushreg r12",
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        "push r13",
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        ".seh_pushreg r13",
         "mov rbp, rsp",
         #[cfg(not(windows))]
         ".cfi_def_cfa_register rbp",
@@ -255,12 +261,28 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         ".seh_endprologue",
 
         "mov r12, rdi",
+        // SysV needs AL for its variadic vector count, so the RAX-based Windows dispatcher
+        // cannot be used. Check before marshalling, with aligned Win64 shadow space, and
+        // retain the checked target in nonvolatile R13 until the call. Do not reload it
+        // from the frame after checking. The checker may clobber Win64 volatile registers.
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        "mov r13, [r12 + {fn_ptr_offset}]",
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        "mov rcx, r13",
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        "sub rsp, 32",
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        "call qword ptr [rip + {guard_check}]",
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        "add rsp, 32",
+
         stack_setup_asm!(),
 
         // Registers:
         // * r10: Current ArgumentMove pointer
         // * r11: Remaining move count; later the target address
         // * r12: CallFrame, preserved across the target call
+        // * r13: Checked target on Windows with CFG hooks, otherwise untouched
         // * rsp: Fixed outgoing allocation base throughout marshalling
         // * xmm8/xmm9/xmm10: Deferred rdi/rsi/rcx argument payloads
         // * rax: Payload or copy scratch
@@ -450,6 +472,11 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
 
         // Set the vector count after all payload and hidden-pointer work that uses rax.
         "mov al, [r12 + {al_offset}]",
+
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        "mov r11, r13",
+
+        #[cfg(not(all(windows, any(target_env = "msvc", target_abi = "llvm"))))]
         "mov r11, [r12 + {fn_ptr_offset}]",
         "call r11",
 
@@ -461,6 +488,8 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
 
         // Restore the stack with a Windows-recognized frame-pointer epilogue.
         "lea rsp, [rbp]",
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        "pop r13",
         "pop r12",
         #[cfg(not(windows))]
         ".cfi_restore r12",
@@ -500,6 +529,8 @@ unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         register_size = const size_of::<Register>(),
 
         fn_ptr_offset = const offset_of!(CallFrame, fn_ptr),
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        guard_check = sym crate::backend::cfguard::__guard_check_icall_fptr,
 
         al_offset = const offset_of!(CallFrame, al),
     );

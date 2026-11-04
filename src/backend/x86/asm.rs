@@ -177,8 +177,8 @@ pub(super) unsafe extern "fastcall-unwind" fn invoke(frame: *mut CallFrame<'_>) 
 
         // Phase boundary: every stack operation is complete. ESI now walks the register
         // suffix, EDI is source/address scratch and EAX holds the payload. ECX/EDX are
-        // initialized once, then preserved after each final load. No copies or helper calls
-        // may clobber them before the target call. EBX/EBP/ESP retain their fixed roles.
+        // initialized once, then preserved after each final load. The CFG check below saves
+        // both argument registers before using ECX. EBX/EBP/ESP retain their fixed roles.
         "60:",
         "mov esi, edx",
         "xor ecx, ecx",
@@ -245,6 +245,27 @@ pub(super) unsafe extern "fastcall-unwind" fn invoke(frame: *mut CallFrame<'_>) 
         "cmp esi, [ebx + {argument_moves_end}]",
         "jne 61b",
         "80:",
+
+        // The x86 checker receives and preserves the target in ECX. Save both argument
+        // registers in nonvolatile scratch, then call the exact address that was checked.
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        "mov edi, ecx",
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        "mov esi, edx",
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        "mov ecx, [ebx + {fn_ptr}]",
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        "call dword ptr [{guard_check}]",
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        "mov eax, ecx",
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        "mov ecx, edi",
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        "mov edx, esi",
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        "call eax",
+
+        #[cfg(not(all(windows, any(target_env = "msvc", target_abi = "llvm"))))]
         "call dword ptr [ebx + {fn_ptr}]",
         // Cdecl leaves ordinary arguments to the caller; SysV callees may pop sret;
         // stdcall/fastcall/thiscall pop their stack arguments. All reach this point:
@@ -306,6 +327,8 @@ pub(super) unsafe extern "fastcall-unwind" fn invoke(frame: *mut CallFrame<'_>) 
         return_value = const offset_of!(CallFrame, return_value),
         x87_size = const offset_of!(CallFrame, x87_size),
         fn_ptr = const offset_of!(CallFrame, fn_ptr),
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        guard_check = sym crate::backend::cfguard::__guard_check_icall_fptr,
         move_source = const offset_of!(ArgumentMove, source),
         move_destination = const offset_of!(ArgumentMove, destination),
         move_size = const offset_of!(ArgumentMove, size),

@@ -2,6 +2,9 @@
 
 use crate::types::{Type, TypeRef, VariadicType};
 
+#[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+mod cfguard;
+
 cfg_select! {
     target_arch = "x86_64" => {
         mod x86_64;

@@ -203,7 +203,7 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
         //   rbp + 8        return address to invoke's caller
         //   rbp            saved rbp
         //   below rbp      dynamic outgoing allocation, including alignment padding
-        // After stack setup, relative to rsp immediately before call r11:
+        // After stack setup, relative to rsp immediately before the target call:
         //   rsp + 0..31    target's shadow space
         //   rsp + 32...    target's stack argument slots
         //   following     16-byte-aligned indirect copies
@@ -378,8 +378,14 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
 
         hidden_return_asm!("rcx"),
 
-        "mov r11, [r12 + {fn_ptr_offset}]",
-        "call r11",
+        // The Windows dispatcher checks RAX and tail-jumps to it, preserving arguments.
+        "mov rax, [r12 + {fn_ptr_offset}]",
+
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        "call qword ptr [rip + {guard_dispatch}]",
+
+        #[cfg(not(all(windows, any(target_env = "msvc", target_abi = "llvm"))))]
+        "call rax",
 
         // Save registers used for return values.
         "mov [r12 + {return_rax_offset}], rax",
@@ -431,6 +437,8 @@ unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
         return_xmm0_offset = const offset_of!(CallFrame, return_xmm0),
 
         fn_ptr_offset = const offset_of!(CallFrame, fn_ptr),
+        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
+        guard_dispatch = sym crate::backend::cfguard::__guard_dispatch_icall_fptr,
     );
 }
 

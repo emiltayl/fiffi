@@ -26,12 +26,14 @@ ABIs on common platforms, and then branch out from there as needed.
   * [x] Marshalling plan (stack buffer)
   * [x] Anything else?
 * [x] 32-bit x86 ABIs for function calls
+* [x] Windows Control Flow Guard hooks for MSVC and GNU LLVM function calls
 * [ ] Aarch64 ABIs for function calls
 * [ ] Review status
 * [ ] Closures?
 
 # Work log
 
+* 2026-11-04 Added Windows CFG checks and dispatch for x86 and x86-64 function calls.
 * 2026-11-04 Added function calls for x86 ABIs.
 * 2026-10-10 Various refactors and smaller changes. Most math should be checked now and some tests
   have been moved out to the common function test suite.
