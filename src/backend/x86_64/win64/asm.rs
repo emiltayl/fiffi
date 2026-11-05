@@ -65,9 +65,10 @@ pub(super) unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
         // the fifth argument at pre-call rsp + 32 is at target entry rsp + 40.
         "push rbp",
         #[cfg(not(windows))]
-        ".cfi_adjust_cfa_offset 8",
-        #[cfg(not(windows))]
-        ".cfi_offset rbp, -16",
+        "
+            .cfi_adjust_cfa_offset 8
+            .cfi_offset rbp, -16
+        ",
         #[cfg(windows)]
         ".seh_pushreg rbp",
         "mov rbp, rsp",
@@ -91,9 +92,10 @@ pub(super) unsafe extern "win64-unwind" fn invoke(call_frame: *mut CallFrame) {
         #[cfg(not(windows))]
         ".cfi_offset rsi, 16",
         #[cfg(windows)]
-        ".seh_savereg rsi, 32",
-        #[cfg(windows)]
-        ".seh_endprologue",
+        "
+            .seh_savereg rsi, 32
+            .seh_endprologue
+        ",
 
         // Keep the `CallFrame` pointer in a nonvolatile register across the target call.
         "mov r12, rcx",

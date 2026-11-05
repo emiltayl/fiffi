@@ -60,29 +60,33 @@ pub(super) unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         // There is no caller shadow space for nonvolatile saves in this ABI.
         "push rbp",
         #[cfg(not(windows))]
-        ".cfi_adjust_cfa_offset 8",
-        #[cfg(not(windows))]
-        ".cfi_offset rbp, -16",
+        "
+            .cfi_adjust_cfa_offset 8
+            .cfi_offset rbp, -16
+        ",
         #[cfg(windows)]
         ".seh_pushreg rbp",
         "push r12",
         #[cfg(not(windows))]
-        ".cfi_adjust_cfa_offset 8",
-        #[cfg(not(windows))]
-        ".cfi_offset r12, -24",
+        "
+            .cfi_adjust_cfa_offset 8
+            .cfi_offset r12, -24
+        ",
         #[cfg(windows)]
         ".seh_pushreg r12",
         #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
-        "push r13",
-        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
-        ".seh_pushreg r13",
+        "
+            push r13
+            .seh_pushreg r13
+        ",
         "mov rbp, rsp",
         #[cfg(not(windows))]
         ".cfi_def_cfa_register rbp",
         #[cfg(windows)]
-        ".seh_setframe rbp, 0",
-        #[cfg(windows)]
-        ".seh_endprologue",
+        "
+            .seh_setframe rbp, 0
+            .seh_endprologue
+        ",
 
         "mov r12, rdi",
         // SysV needs AL for its variadic vector count, so the RAX-based Windows dispatcher
@@ -90,15 +94,13 @@ pub(super) unsafe extern "sysv64-unwind" fn invoke(call_frame: *mut CallFrame) {
         // retain the checked target in nonvolatile R13 until the call. Do not reload it
         // from the frame after checking. The checker may clobber Win64 volatile registers.
         #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
-        "mov r13, [r12 + {fn_ptr_offset}]",
-        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
-        "mov rcx, r13",
-        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
-        "sub rsp, 32",
-        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
-        "call qword ptr [rip + {guard_check}]",
-        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
-        "add rsp, 32",
+        "
+            mov r13, [r12 + {fn_ptr_offset}]
+            mov rcx, r13
+            sub rsp, 32
+            call qword ptr [rip + {guard_check}]
+            add rsp, 32
+        ",
 
         stack_setup_asm!(),
 

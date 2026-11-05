@@ -36,9 +36,10 @@ pub(super) unsafe extern "fastcall-unwind" fn invoke(frame: *mut CallFrame<'_>) 
 
         "push ebp",
         #[cfg(not(any(target_env = "msvc", target_os = "uefi")))]
-        ".cfi_def_cfa_offset 8",
-        #[cfg(not(any(target_env = "msvc", target_os = "uefi")))]
-        ".cfi_offset ebp, -8",
+        "
+            .cfi_def_cfa_offset 8
+            .cfi_offset ebp, -8
+        ",
 
         "mov ebp, esp",
         #[cfg(not(any(target_env = "msvc", target_os = "uefi")))]
@@ -249,21 +250,16 @@ pub(super) unsafe extern "fastcall-unwind" fn invoke(frame: *mut CallFrame<'_>) 
         // The x86 checker receives and preserves the target in ECX. Save both argument
         // registers in nonvolatile scratch, then call the exact address that was checked.
         #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
-        "mov edi, ecx",
-        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
-        "mov esi, edx",
-        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
-        "mov ecx, [ebx + {fn_ptr}]",
-        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
-        "call dword ptr [{guard_check}]",
-        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
-        "mov eax, ecx",
-        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
-        "mov ecx, edi",
-        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
-        "mov edx, esi",
-        #[cfg(all(windows, any(target_env = "msvc", target_abi = "llvm")))]
-        "call eax",
+        "
+            mov edi, ecx
+            mov esi, edx
+            mov ecx, [ebx + {fn_ptr}]
+            call dword ptr [{guard_check}]
+            mov eax, ecx
+            mov ecx, edi
+            mov edx, esi
+            call eax
+        ",
 
         #[cfg(not(all(windows, any(target_env = "msvc", target_abi = "llvm"))))]
         "call dword ptr [ebx + {fn_ptr}]",
@@ -302,10 +298,10 @@ pub(super) unsafe extern "fastcall-unwind" fn invoke(frame: *mut CallFrame<'_>) 
 
         "pop ebp",
         #[cfg(not(any(target_env = "msvc", target_os = "uefi")))]
-        ".cfi_restore ebp",
-
-        #[cfg(not(any(target_env = "msvc", target_os = "uefi")))]
-        ".cfi_def_cfa esp, 4",
+        "
+            .cfi_restore ebp
+            .cfi_def_cfa esp, 4
+        ",
 
         "ret",
 
